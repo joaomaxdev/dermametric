@@ -38,6 +38,52 @@ DEFAULT_HOST = "127.0.0.1"
 PREFERRED_PORT = 8765
 HEALTH_PATH = "/api/health"
 
+# Em executáveis Windows ``--windowed`` (PyInstaller) ``sys.stdout`` e
+# ``sys.stderr`` são ``None``. Uvicorn/logging tentam chamar ``isatty()`` neles
+# durante a configuração e quebram com AttributeError/ValueError. Garantimos
+# streams graváveis antes de qualquer logging.
+_stream_fallback = None
+_missing_streams: set[str] = set()
+
+
+def _ensure_standard_streams(log_path: Path | None = None) -> None:
+    """Substitui streams nulos por arquivo de log ou ``os.devnull``.
+
+    Em modo ``--windowed`` não existe console: ``sys.stdout``/``sys.stderr``
+    são ``None``. Este guard roda cedo (import do módulo) e novamente antes do
+    Uvicorn, aceitando um ``log_path`` para trocar o devnull por um log real.
+    """
+    global _stream_fallback
+
+    missing = [
+        name for name in ("stdout", "stderr") if getattr(sys, name, None) is None
+    ]
+    _missing_streams.update(missing)
+    if not _missing_streams:
+        return
+
+    previous = _stream_fallback
+    stream = previous
+    if log_path is not None:
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            stream = open(log_path, "a", encoding="utf-8", buffering=1)
+        except OSError:
+            stream = previous
+    if stream is None:
+        stream = open(os.devnull, "w", encoding="utf-8")
+    _stream_fallback = stream
+
+    for name in _missing_streams:
+        current = getattr(sys, name, None)
+        # Só substitui o None original ou o nosso próprio fallback (permite
+        # sair de devnull para desktop.log), nunca um stream real restaurado.
+        if current is None or current is previous:
+            setattr(sys, name, stream)
+
+
+_ensure_standard_streams()
+
 # Em desenvolvimento, garante que ``backend`` seja importável a partir da raiz.
 _REPO_ROOT = Path(__file__).resolve().parent
 if str(_REPO_ROOT) not in sys.path:
@@ -81,6 +127,7 @@ class LocalServer:
         return f"http://{self.host}:{self.port}"
 
     def start(self) -> "LocalServer":
+        _ensure_standard_streams()
         import uvicorn
 
         config = uvicorn.Config(
@@ -89,6 +136,8 @@ class LocalServer:
             port=self.port,
             log_level="warning",
             access_log=False,
+            log_config=None,
+            use_colors=False,
         )
         self._server = uvicorn.Server(config)
         self._thread = threading.Thread(
@@ -237,6 +286,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     data_dir = _prepare_data_dir(args.data_dir)
+    # Em modo --windowed, troca o devnull inicial por um log no DATA_DIR.
+    _ensure_standard_streams(data_dir / "desktop.log")
     port = args.port or find_free_port(args.host)
 
     if args.smoke_test:

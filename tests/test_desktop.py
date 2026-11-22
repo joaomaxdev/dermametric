@@ -105,3 +105,40 @@ def test_desktop_launcher_smoke_health_and_data_isolation(tmp_path):
     assert (expected / "storage" / ".secret.key").exists()
     # Nada foi gravado no storage real do repositório durante o smoke test.
     assert (ROOT / "storage").resolve() != (expected / "storage").resolve()
+
+
+def test_server_starts_without_std_streams(monkeypatch):
+    """Simula PyInstaller --windowed: sys.stdout/stderr = None.
+
+    O Uvicorn não pode tentar ``sys.stderr.isatty()`` nem reconfigurar o
+    formatador padrão (AttributeError/ValueError).
+    """
+    from fastapi import FastAPI
+
+    import desktop_launcher as launcher
+
+    app = FastAPI()
+
+    @app.get("/api/health")
+    def _health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    port = launcher.find_free_port()
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+
+    server = launcher.LocalServer(app, port=port)
+    server.start()
+    try:
+        health = server.wait_until_ready(timeout=30)
+        assert health == {"status": "ok"}
+        # O guard instalou streams graváveis (devnull/log) no lugar dos None.
+        assert sys.stdout is not None
+        assert sys.stderr is not None
+        assert hasattr(sys.stdout, "isatty")
+        assert hasattr(sys.stderr, "isatty")
+    finally:
+        server.stop()
+        launcher._stream_fallback = None
+        launcher._missing_streams.clear()
+
