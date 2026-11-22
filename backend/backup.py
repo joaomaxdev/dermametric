@@ -1,0 +1,791 @@
+"""Backup e restauração proprietários do DermaMetric (``.dmbak``).
+
+Formato binário ``DMBAK\\x01\\x00\\x00``::
+
+    magic (8) | salt (16) | iterations (4, BE) | password-check (8)
+              | payload-len (8, BE) | HMAC-SHA256 (32) | payload
+
+O payload é um ZIP cifrado com Fernet/AES (chave derivada da senha mestra via
+PBKDF2-SHA256 e salt aleatório do cabeçalho). O HMAC-SHA256 autentica
+cabeçalho + ciphertext, detectando qualquer adulteração. Dentro do ZIP:
+
+* ``manifest.json`` — versão, data UTC, modo, profissional emissor, contagens
+  e checksums SHA-256 de todos os itens;
+* ``records.json`` — pacientes, dados pessoais, PIN (hash), sessões, marcos,
+  ROIs, medições e escalas clínicas (já descriptografados no envelope);
+* ``blobs/<rel_path>`` — imagens originais referenciadas pelas sessões.
+
+As imagens são guardadas descriptografadas *dentro* do envelope cifrado e, na
+restauração, são recifradas com a DEK local (``STORAGE_KEY``), permanecendo
+sempre cifradas em repouso no storage da instalação.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import io
+import json
+import secrets
+import struct
+import zipfile
+from datetime import datetime, timezone
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+from cryptography.fernet import Fernet, InvalidToken
+
+from . import database as db
+from . import security
+
+MAGIC = b"DMBAK\x01\x00\x00"
+FORMAT_VERSION = 1
+APP_NAME = "DermaMetric"
+PAYLOAD_FORMAT = "dmbak"
+
+SALT_LEN = 16
+CHECK_LEN = 8
+TAG_LEN = 32
+PBKDF2_ITERATIONS = 200_000
+
+# magic + salt + iterations + checker + payload_len
+_HEADER_PREFIX_LEN = 8 + SALT_LEN + 4 + CHECK_LEN + 8
+_MIN_FILE_LEN = _HEADER_PREFIX_LEN + TAG_LEN
+
+MANIFEST_NAME = "manifest.json"
+RECORDS_NAME = "records.json"
+BLOB_PREFIX = "blobs/"
+
+_IMAGE_FIELDS = (
+    "clean_image_path",
+    "ruler_image_path",
+    "aligned_image_path",
+    "enhanced_image_path",
+)
+
+
+class BackupError(ValueError):
+    """Arquivo inválido, adulterado ou incompatível."""
+
+
+class BackupPasswordError(PermissionError):
+    """Senha mestra incorreta para o arquivo informado."""
+
+
+# ---------------------------------------------------------------------------
+# Criptografia do envelope
+# ---------------------------------------------------------------------------
+def _derive_material(password: str, salt: bytes, iterations: int) -> tuple[bytes, bytes]:
+    """Deriva (chave Fernet, chave HMAC) da senha mestra e do salt."""
+    material = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt, iterations, dklen=64
+    )
+    fernet_key = base64.urlsafe_b64encode(material[:32])
+    return fernet_key, material[32:]
+
+
+def _password_check(mac_key: bytes) -> bytes:
+    return hashlib.sha256(mac_key + b"dmbak-password-check").digest()[:CHECK_LEN]
+
+
+def encrypt_backup_bytes(payload: bytes, password: str) -> bytes:
+    """Encapsula o ZIP ``payload`` no envelope ``.dmbak`` autenticado."""
+    if not password:
+        raise BackupPasswordError("Informe a senha mestra para cifrar o backup.")
+    salt = secrets.token_bytes(SALT_LEN)
+    fernet_key, mac_key = _derive_material(password, salt, PBKDF2_ITERATIONS)
+    cipher = Fernet(fernet_key).encrypt(payload)
+    prefix = (
+        MAGIC
+        + salt
+        + struct.pack(">I", PBKDF2_ITERATIONS)
+        + _password_check(mac_key)
+        + struct.pack(">Q", len(cipher))
+    )
+    tag = hmac.new(mac_key, prefix + cipher, hashlib.sha256).digest()
+    return prefix + tag + cipher
+
+
+def decrypt_backup_bytes(data: bytes, password: str) -> bytes:
+    """Valida magic, senha e HMAC; devolve o ZIP interno do backup."""
+    if len(data) < _MIN_FILE_LEN or not data.startswith(MAGIC):
+        raise BackupError(
+            "Arquivo inválido: não é um backup DermaMetric (.dmbak)."
+        )
+    offset = 8
+    salt = data[offset : offset + SALT_LEN]
+    offset += SALT_LEN
+    (iterations,) = struct.unpack(">I", data[offset : offset + 4])
+    offset += 4
+    check = data[offset : offset + CHECK_LEN]
+    offset += CHECK_LEN
+    (payload_len,) = struct.unpack(">Q", data[offset : offset + 8])
+    offset += 8
+    tag = data[offset : offset + TAG_LEN]
+    offset += TAG_LEN
+    cipher = data[offset:]
+    if iterations <= 0 or iterations > 10_000_000:
+        raise BackupError("Cabeçalho .dmbak inválido (iterações PBKDF2).")
+    if payload_len != len(cipher):
+        raise BackupError("Backup truncado ou com tamanho inconsistente.")
+
+    fernet_key, mac_key = _derive_material(password, salt, iterations)
+    if not hmac.compare_digest(check, _password_check(mac_key)):
+        raise BackupPasswordError("Senha mestra incorreta para este backup.")
+
+    expected_tag = hmac.new(
+        mac_key, data[:_HEADER_PREFIX_LEN] + cipher, hashlib.sha256
+    ).digest()
+    if not hmac.compare_digest(tag, expected_tag):
+        raise BackupError(
+            "Backup corrompido ou adulterado: falha na verificação HMAC-SHA256."
+        )
+    try:
+        return Fernet(fernet_key).decrypt(cipher)
+    except InvalidToken as exc:  # pragma: no cover - HMAC já cobre este caso
+        raise BackupError("Não foi possível decifrar o backup.") from exc
+
+
+# ---------------------------------------------------------------------------
+# Coleta dos registros
+# ---------------------------------------------------------------------------
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _decrypt(value: Any) -> Any:
+    return db._decrypt_text(value)
+
+
+def _clean_json(value: Any) -> Any:
+    """Normaliza um campo JSON cifrado para estrutura serializável."""
+    parsed = db._json_or_none(_decrypt(value))
+    if isinstance(parsed, (dict, list)) or parsed is None:
+        return parsed
+    return parsed
+
+
+def _measurement_record(entry: dict[str, Any]) -> dict[str, Any]:
+    nested = entry.get("measurement") or {}
+    return {
+        "stria_code": entry.get("stria_code") or nested.get("stria_code"),
+        "stria_label": entry.get("stria_label") or nested.get("stria_label"),
+        "polygon": entry.get("polygon") or nested.get("polygon") or [],
+        "metrics": entry.get("metrics") or nested.get("metrics") or {},
+        "delta_e_00": (
+            entry.get("delta_e_00")
+            if entry.get("delta_e_00") is not None
+            else nested.get("delta_e_00")
+        ),
+        "created_at": nested.get("created_at"),
+    }
+
+
+def _session_record(conn, session: dict[str, Any]) -> dict[str, Any]:
+    session_id = session.get("id")
+    rois = []
+    if session_id:
+        for row in conn.execute(
+            "SELECT roi_json, created_at FROM stria_roi WHERE session_id = ? ORDER BY id",
+            (session_id,),
+        ):
+            rois.append(
+                {
+                    "roi": _clean_json(row["roi_json"]),
+                    "created_at": row["created_at"],
+                }
+            )
+    return {
+        "id": session_id,
+        "patient_id": session.get("patient_id"),
+        "session_code": session.get("session_code") or session.get("code"),
+        "label": session.get("label"),
+        "captured_at": session.get("captured_at"),
+        "px_per_mm": session.get("px_per_mm"),
+        "ruler_points": session.get("ruler_points"),
+        "landmarks": session.get("landmarks"),
+        "healthy_skin_roi": session.get("healthy_skin_roi"),
+        "lesion_labels": session.get("lesion_labels"),
+        "clinical_scales": session.get("clinical_scales"),
+        "clean_image_path": session.get("clean_image_path"),
+        "ruler_image_path": session.get("ruler_image_path"),
+        "aligned_image_path": session.get("aligned_image_path"),
+        "enhanced_image_path": session.get("enhanced_image_path"),
+        "updated_at": session.get("updated_at"),
+        "measurements": [
+            _measurement_record(m) for m in (session.get("measurements") or [])
+        ],
+        "stria_roi": rois,
+    }
+
+
+def _patient_record(conn, row) -> dict[str, Any]:
+    patient = dict(row)
+    patient_id = patient["id"]
+    pin_row = conn.execute(
+        "SELECT pin_hash, created_at, updated_at FROM patient_pins WHERE patient_id = ?",
+        (patient_id,),
+    ).fetchone()
+    sessions = db._patient_sessions(conn, patient_id)
+    return {
+        "id": patient_id,
+        "code": patient.get("code"),
+        "name": _decrypt(patient.get("name")),
+        "notes": _decrypt(patient.get("notes")),
+        "birth_date": _decrypt(patient.get("birth_date")),
+        "phone": _decrypt(patient.get("phone")),
+        "locked": bool(patient.get("locked")),
+        "created_at": patient.get("created_at"),
+        "updated_at": patient.get("updated_at"),
+        "pin": dict(pin_row) if pin_row else None,
+        "sessions": [_session_record(conn, session) for session in sessions],
+    }
+
+
+def collect_records(patient_id: str | None = None) -> dict[str, Any]:
+    """Monta o ``records.json`` a partir do banco (dados já descriptografados)."""
+    with db.connection() as conn:
+        if patient_id:
+            rows = conn.execute(
+                "SELECT * FROM patients WHERE id = ?", (patient_id,)
+            ).fetchall()
+            if not rows:
+                raise LookupError("Paciente não encontrado para o backup.")
+        else:
+            rows = conn.execute("SELECT * FROM patients ORDER BY code").fetchall()
+        patients = [_patient_record(conn, row) for row in rows]
+    return {
+        "format_version": FORMAT_VERSION,
+        "generated_at": _utc_now_iso(),
+        "mode": "patient" if patient_id else "full",
+        "patients": patients,
+    }
+
+
+def _collect_blobs(records: dict[str, Any]) -> dict[str, bytes]:
+    """Lê e descriptografa as imagens referenciadas (para o envelope)."""
+    blobs: dict[str, bytes] = {}
+    for patient in records.get("patients") or []:
+        for session in patient.get("sessions") or []:
+            for field in _IMAGE_FIELDS:
+                relative = session.get(field)
+                if not relative or relative in blobs:
+                    continue
+                absolute = db.storage_absolute(relative)
+                if absolute is None or not absolute.exists():
+                    continue
+                try:
+                    blobs[relative] = security.read_encrypted_file(absolute)
+                except Exception as exc:  # noqa: BLE001 - blob ilegível
+                    raise BackupError(
+                        f"Não foi possível ler a imagem {relative} para o backup."
+                    ) from exc
+    return blobs
+
+
+def _build_payload(
+    records: dict[str, Any], blobs: dict[str, bytes], professional: dict[str, str]
+) -> tuple[bytes, dict[str, Any]]:
+    records_bytes = json.dumps(
+        records, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    checksums = {RECORDS_NAME: hashlib.sha256(records_bytes).hexdigest()}
+    blob_items: list[tuple[str, bytes]] = []
+    for relative, data in sorted(blobs.items()):
+        safe = _safe_relative_blob(relative)
+        name = f"{BLOB_PREFIX}{safe}"
+        checksums[name] = hashlib.sha256(data).hexdigest()
+        blob_items.append((name, data))
+
+    session_count = sum(
+        len(patient.get("sessions") or []) for patient in records.get("patients") or []
+    )
+    measurement_count = sum(
+        len(session.get("measurements") or [])
+        for patient in records.get("patients") or []
+        for session in patient.get("sessions") or []
+    )
+    manifest = {
+        "app": APP_NAME,
+        "format": PAYLOAD_FORMAT,
+        "format_version": FORMAT_VERSION,
+        "created_at": records["generated_at"],
+        "mode": records["mode"],
+        "professional": {
+            "name": str(professional.get("professional_name") or ""),
+            "registry": str(professional.get("professional_registry") or ""),
+            "institution": str(professional.get("institution") or ""),
+        },
+        "patient_codes": [
+            str(patient.get("code") or "") for patient in records.get("patients") or []
+        ],
+        "counts": {
+            "patients": len(records.get("patients") or []),
+            "sessions": session_count,
+            "measurements": measurement_count,
+            "images": len(blob_items),
+            "blobs": len(blob_items),
+        },
+        "checksums": checksums,
+        "encryption": {
+            "payload": "fernet-aes256",
+            "kdf": "pbkdf2_sha256",
+            "iterations": PBKDF2_ITERATIONS,
+            "integrity": "hmac_sha256",
+        },
+    }
+    manifest_bytes = json.dumps(
+        manifest, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(MANIFEST_NAME, manifest_bytes)
+        archive.writestr(RECORDS_NAME, records_bytes)
+        for name, data in blob_items:
+            archive.writestr(name, data)
+    return buffer.getvalue(), manifest
+
+
+def _safe_relative_blob(relative: str) -> str:
+    path = PurePosixPath(str(relative).replace("\\", "/"))
+    if path.is_absolute() or any(part in {"..", ""} for part in path.parts):
+        raise BackupError(f"Caminho de imagem inválido no backup: {relative!r}")
+    return "/".join(path.parts)
+
+
+# ---------------------------------------------------------------------------
+# Exportação
+# ---------------------------------------------------------------------------
+def export_backup(
+    password: str, patient_id: str | None = None
+) -> tuple[bytes, dict[str, Any]]:
+    """Gera o arquivo ``.dmbak`` (completo ou de um único paciente)."""
+    records = collect_records(patient_id)
+    blobs = _collect_blobs(records)
+    payload, manifest = _build_payload(records, blobs, db.get_profile())
+    data = encrypt_backup_bytes(payload, password)
+    summary = {
+        "mode": records["mode"],
+        "created_at": manifest["created_at"],
+        "patient_codes": manifest["patient_codes"],
+        "counts": manifest["counts"],
+        "size_bytes": len(data),
+    }
+    return data, summary
+
+
+def backup_filename(summary: dict[str, Any]) -> str:
+    """Nome de download: completo por data/hora, individual pelo código."""
+    if summary.get("mode") == "patient" and summary.get("patient_codes"):
+        code = "".join(
+            ch for ch in str(summary["patient_codes"][0]) if ch.isalnum() or ch in "-_"
+        )
+        return f"{code or 'DermaMetric-Paciente'}.dmbak"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+    return f"DermaMetric-Backup-{stamp}.dmbak"
+
+
+# ---------------------------------------------------------------------------
+# Leitura, inspeção e restauração
+# ---------------------------------------------------------------------------
+def read_backup(data: bytes, password: str) -> dict[str, Any]:
+    """Decifra e valida integralmente um ``.dmbak`` sem tocar no banco."""
+    payload = decrypt_backup_bytes(data, password)
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(payload))
+    except zipfile.BadZipFile as exc:
+        raise BackupError("Conteúdo interno do backup está corrompido.") from exc
+
+    with archive:
+        names = set(archive.namelist())
+        if MANIFEST_NAME not in names or RECORDS_NAME not in names:
+            raise BackupError("Backup incompleto: manifest.json/records.json ausentes.")
+        try:
+            manifest = json.loads(archive.read(MANIFEST_NAME).decode("utf-8"))
+            records = json.loads(archive.read(RECORDS_NAME).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise BackupError("Metadados do backup ilegíveis.") from exc
+        if not isinstance(manifest, dict) or not isinstance(records, dict):
+            raise BackupError("Estrutura do backup inválida.")
+        if int(manifest.get("format_version") or 0) != FORMAT_VERSION:
+            raise BackupError(
+                "Versão de backup incompatível com esta instalação do DermaMetric."
+            )
+        checksums = manifest.get("checksums") or {}
+        if not isinstance(checksums, dict):
+            raise BackupError("Manifesto sem checksums válidos.")
+        for name, expected in checksums.items():
+            if name not in names:
+                raise BackupError(f"Item ausente no backup: {name}")
+            actual = hashlib.sha256(archive.read(name)).hexdigest()
+            if not hmac.compare_digest(str(expected), actual):
+                raise BackupError(f"Checksum divergente no backup: {name}")
+        for name in names:
+            if name in {MANIFEST_NAME, RECORDS_NAME}:
+                continue
+            if name not in checksums:
+                raise BackupError(f"Item não autenticado no backup: {name}")
+        blobs = {
+            name: archive.read(name)
+            for name in names
+            if name.startswith(BLOB_PREFIX)
+        }
+    return {"manifest": manifest, "records": records, "blobs": blobs}
+
+
+def _local_codes() -> set[str]:
+    with db.connection() as conn:
+        return {
+            str(row["code"])
+            for row in conn.execute("SELECT code FROM patients")
+            if row["code"]
+        }
+
+
+def inspect_backup(data: bytes, password: str) -> dict[str, Any]:
+    """Resumo do conteúdo do arquivo, sem qualquer alteração no banco."""
+    parsed = read_backup(data, password)
+    manifest = parsed["manifest"]
+    records = parsed["records"]
+    codes = [
+        str(patient.get("code") or "")
+        for patient in records.get("patients") or []
+        if patient.get("code")
+    ]
+    existing = _local_codes()
+    conflicts = [code for code in codes if code in existing]
+    counts = dict(manifest.get("counts") or {})
+    counts.setdefault("patients", len(codes))
+    return {
+        "format_version": manifest.get("format_version"),
+        "created_at": manifest.get("created_at"),
+        "mode": manifest.get("mode"),
+        "professional": manifest.get("professional") or {},
+        "counts": counts,
+        "patient_codes": codes,
+        "conflicts": conflicts,
+        "has_conflicts": bool(conflicts),
+        "encryption": manifest.get("encryption") or {},
+        "size_bytes": len(data),
+    }
+
+
+def _encrypt_optional(value: Any) -> str | None:
+    if value is None:
+        return None
+    return security.encrypt_text(str(value))
+
+
+def _encrypt_json(value: Any) -> str | None:
+    if value is None:
+        return None
+    return security.encrypt_text(
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    )
+
+
+def _insert_patient(conn, patient: dict[str, Any]) -> str:
+    patient_id = str(patient.get("id") or secrets.token_hex(16))
+    pin = patient.get("pin") or {}
+    locked = 1 if pin.get("pin_hash") else 0
+    now = db.db_utc_now()
+    conn.execute(
+        """INSERT INTO patients
+             (id, code, name, notes, birth_date, phone, locked, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            patient_id,
+            str(patient.get("code") or patient_id),
+            _encrypt_optional(patient.get("name") or ""),
+            _encrypt_optional(patient.get("notes") or ""),
+            _encrypt_optional(patient.get("birth_date") or ""),
+            _encrypt_optional(patient.get("phone") or ""),
+            locked,
+            patient.get("created_at") or now,
+            patient.get("updated_at") or now,
+        ),
+    )
+    if pin.get("pin_hash"):
+        conn.execute(
+            """INSERT OR REPLACE INTO patient_pins
+                 (patient_id, pin_hash, created_at, updated_at)
+               VALUES (?, ?, ?, ?)""",
+            (
+                patient_id,
+                pin["pin_hash"],
+                pin.get("created_at") or now,
+                pin.get("updated_at") or now,
+            ),
+        )
+    return patient_id
+
+
+def _insert_session(conn, session: dict[str, Any], patient_id: str) -> None:
+    code = str(session.get("session_code") or "T0")
+    session_id = str(session.get("id") or f"{patient_id}:{code}")
+    now = db.db_utc_now()
+    conn.execute(
+        """INSERT INTO sessions
+             (id, patient_id, session_code, label, captured_at, px_per_mm,
+              ruler_points_json, landmarks_json, healthy_skin_roi_json,
+              aligned_image_path, enhanced_image_path, ruler_image_path,
+              clean_image_path, lesion_labels_json, clinical_scales_json,
+              updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            session_id,
+            patient_id,
+            code,
+            _encrypt_optional(session.get("label") or ""),
+            session.get("captured_at"),
+            float(session.get("px_per_mm") or 0.0),
+            _encrypt_json(session.get("ruler_points")),
+            _encrypt_json(session.get("landmarks")),
+            _encrypt_json(session.get("healthy_skin_roi")),
+            session.get("aligned_image_path"),
+            session.get("enhanced_image_path"),
+            session.get("ruler_image_path"),
+            session.get("clean_image_path"),
+            _encrypt_json(session.get("lesion_labels")),
+            _encrypt_json(session.get("clinical_scales")),
+            session.get("updated_at") or now,
+        ),
+    )
+    existing = {
+        str(row["stria_code"])
+        for row in conn.execute(
+            "SELECT stria_code FROM striae_measurements WHERE session_id = ?",
+            (session_id,),
+        )
+    }
+    for measurement in session.get("measurements") or []:
+        code_m = str(measurement.get("stria_code") or "")
+        if not code_m or code_m in existing:
+            continue
+        metrics = measurement.get("metrics") or {}
+        conn.execute(
+            """INSERT INTO striae_measurements
+                 (session_id, stria_code, polygon_json, metrics_json,
+                  stria_label, delta_e_00, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                code_m,
+                _encrypt_json(measurement.get("polygon") or []),
+                _encrypt_json(metrics),
+                measurement.get("stria_label"),
+                measurement.get("delta_e_00"),
+                measurement.get("created_at") or now,
+            ),
+        )
+        existing.add(code_m)
+    roi_count = conn.execute(
+        "SELECT COUNT(*) AS total FROM stria_roi WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()["total"]
+    if not roi_count:
+        for roi in session.get("stria_roi") or []:
+            conn.execute(
+                "INSERT INTO stria_roi (session_id, roi_json, created_at)"
+                " VALUES (?, ?, ?)",
+                (
+                    session_id,
+                    _encrypt_json(roi.get("roi")),
+                    roi.get("created_at") or now,
+                ),
+            )
+
+
+def _merge_session(
+    conn, existing_row: dict[str, Any], session: dict[str, Any], patient_id: str
+) -> None:
+    """Completa uma sessão existente sem apagar dados locais."""
+    session_id = existing_row["id"]
+    updates: list[tuple[str, Any]] = []
+    field_map = {
+        "label": "label",
+        "captured_at": "captured_at",
+        "ruler_points": "ruler_points_json",
+        "landmarks": "landmarks_json",
+        "healthy_skin_roi": "healthy_skin_roi_json",
+        "lesion_labels": "lesion_labels_json",
+        "clinical_scales": "clinical_scales_json",
+    }
+    for source, column in field_map.items():
+        if existing_row.get(column):
+            continue
+        value = session.get(source)
+        if value in (None, "", {}, []):
+            continue
+        updates.append((column, _encrypt_json(value) if source not in {"label", "captured_at"} else _encrypt_optional(value)))
+    for field in _IMAGE_FIELDS:
+        if existing_row.get(field) or not session.get(field):
+            continue
+        updates.append((field, session.get(field)))
+    if not existing_row.get("px_per_mm") and session.get("px_per_mm"):
+        updates.append(("px_per_mm", float(session.get("px_per_mm"))))
+    if updates:
+        sets = ", ".join(f"{column} = ?" for column, _ in updates)
+        conn.execute(
+            f"UPDATE sessions SET {sets}, updated_at = ? WHERE id = ?",
+            [value for _, value in updates] + [db.db_utc_now(), session_id],
+        )
+    existing = {
+        str(row["stria_code"])
+        for row in conn.execute(
+            "SELECT stria_code FROM striae_measurements WHERE session_id = ?",
+            (session_id,),
+        )
+    }
+    now = db.db_utc_now()
+    for measurement in session.get("measurements") or []:
+        code_m = str(measurement.get("stria_code") or "")
+        if not code_m or code_m in existing:
+            continue
+        conn.execute(
+            """INSERT INTO striae_measurements
+                 (session_id, stria_code, polygon_json, metrics_json,
+                  stria_label, delta_e_00, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                code_m,
+                _encrypt_json(measurement.get("polygon") or []),
+                _encrypt_json(measurement.get("metrics") or {}),
+                measurement.get("stria_label"),
+                measurement.get("delta_e_00"),
+                measurement.get("created_at") or now,
+            ),
+        )
+        existing.add(code_m)
+    roi_count = conn.execute(
+        "SELECT COUNT(*) AS total FROM stria_roi WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()["total"]
+    if not roi_count:
+        for roi in session.get("stria_roi") or []:
+            conn.execute(
+                "INSERT INTO stria_roi (session_id, roi_json, created_at)"
+                " VALUES (?, ?, ?)",
+                (session_id, _encrypt_json(roi.get("roi")), roi.get("created_at") or now),
+            )
+
+
+def _apply_records(records: dict[str, Any], mode: str) -> dict[str, int]:
+    stats = {
+        "patients": 0,
+        "patients_merged": 0,
+        "sessions": 0,
+        "measurements": 0,
+    }
+    with db.connection() as conn:
+        if mode == "replace":
+            conn.execute("DELETE FROM striae_measurements")
+            conn.execute("DELETE FROM stria_roi")
+            conn.execute("DELETE FROM patient_pins")
+            conn.execute("DELETE FROM sessions")
+            conn.execute("DELETE FROM patients")
+        for patient in records.get("patients") or []:
+            code = str(patient.get("code") or "")
+            existing_patient = None
+            if mode == "merge" and code:
+                existing_patient = conn.execute(
+                    "SELECT * FROM patients WHERE code = ?", (code,)
+                ).fetchone()
+            if existing_patient is not None:
+                local_id = existing_patient["id"]
+                stats["patients_merged"] += 1
+                local_sessions = {
+                    str(row["session_code"] or row["id"]): dict(row)
+                    for row in conn.execute(
+                        "SELECT * FROM sessions WHERE patient_id = ?", (local_id,)
+                    )
+                }
+                for session in patient.get("sessions") or []:
+                    session_code = str(session.get("session_code") or "T0")
+                    existing_session = local_sessions.get(session_code)
+                    if existing_session is not None:
+                        _merge_session(conn, existing_session, session, local_id)
+                    else:
+                        incoming = dict(session)
+                        incoming["id"] = f"{local_id}:{session_code}"
+                        _insert_session(conn, incoming, local_id)
+                        stats["sessions"] += 1
+                    stats["measurements"] += len(session.get("measurements") or [])
+                continue
+
+            patient_id = _insert_patient(conn, patient)
+            stats["patients"] += 1
+            for session in patient.get("sessions") or []:
+                _insert_session(conn, session, patient_id)
+                stats["sessions"] += 1
+                stats["measurements"] += len(session.get("measurements") or [])
+    return stats
+
+
+def _write_blobs(blobs: dict[str, bytes]) -> int:
+    written = 0
+    for name, data in blobs.items():
+        if not name.startswith(BLOB_PREFIX):
+            continue
+        relative = _safe_relative_blob(name[len(BLOB_PREFIX):])
+        # ``db.STORAGE_DIR`` espelha ``backend.paths.STORAGE_DIR`` (dev x
+        # empacotado) e é o ponto único já utilizado pelo restante do backend.
+        destination = (db.STORAGE_DIR / relative).resolve()
+        storage_root = Path(db.STORAGE_DIR).resolve()
+        if storage_root not in destination.parents and destination != storage_root:
+            raise BackupError(f"Destino de imagem fora do storage: {relative}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        payload = security.encrypt_bytes(data) if relative.endswith(".enc") else data
+        destination.write_bytes(payload)
+        try:
+            destination.chmod(0o600)
+        except OSError:  # pragma: no cover - plataformas sem chmod
+            pass
+        written += 1
+    return written
+
+
+def restore_backup(data: bytes, password: str, mode: str = "merge") -> dict[str, Any]:
+    """Restaura o backup, criando antes um snapshot de segurança local."""
+    if mode not in {"merge", "replace"}:
+        raise BackupError("Modo de restauração inválido. Use 'merge' ou 'replace'.")
+    parsed = read_backup(data, password)
+    records = parsed["records"]
+    manifest = parsed["manifest"]
+
+    # Snapshot automático do estado atual antes de qualquer gravação.
+    snapshot_bytes, _ = export_backup(password)
+    # ``db.DATA_DIR`` deriva de ``backend.paths.DATA_DIR`` (perfil do usuário
+    # quando empacotado), mantendo os snapshots junto aos dados persistentes.
+    backup_dir = db.DATA_DIR / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    snapshot_path = backup_dir / f"pre_restore_{stamp}.dmbak"
+    counter = 1
+    while snapshot_path.exists():
+        snapshot_path = backup_dir / f"pre_restore_{stamp}-{counter}.dmbak"
+        counter += 1
+    snapshot_path.write_bytes(snapshot_bytes)
+    try:
+        snapshot_path.chmod(0o600)
+    except OSError:  # pragma: no cover
+        pass
+
+    stats = _apply_records(records, mode)
+    images = _write_blobs(parsed["blobs"])
+    return {
+        "restored": True,
+        "mode": mode,
+        "source_created_at": manifest.get("created_at"),
+        "source_mode": manifest.get("mode"),
+        "patient_codes": manifest.get("patient_codes") or [],
+        "patients": stats["patients"],
+        "patients_merged": stats["patients_merged"],
+        "sessions": stats["sessions"],
+        "measurements": stats["measurements"],
+        "images": images,
+        "snapshot": snapshot_path.name,
+    }

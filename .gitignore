@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Banco de dados e artefatos clínicos (nunca versionar)
+storage/uploads/*
+storage/processed/*
+storage/dermametric.db
+storage/*.db
+storage/*.db-journal
+storage/*.db-wal
+storage/*.db-shm
+storage/.secret.key
+storage/.work/
+
+# Mantém as pastas no repositório
+!storage/uploads/.gitkeep
+!storage/processed/.gitkeep
+
+# Imagens e exportações geradas nos testes
+tests/tmp/
+tests/tmp_backup/
+tests/output/
+
+# Backups locais (snapshots pre_restore e exportações)
+data/backups/
+
+# Empacotamento (PyInstaller / Inno Setup)
+build/
+dist/
+*.manifest
+
+# Sistema / editores
+.DS_Store
+*.swp
+.idea/
+.vscode/
+data/*.db

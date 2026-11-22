@@ -1,0 +1,1024 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DermaMetric · Estação clínica</title>
+  <meta name="description" content="Estação clínica de fotogrametria e morfometria para acompanhamento longitudinal de lesões e regiões cutâneas." />
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <!-- Tela de bloqueio / login (exibida antes de qualquer dado clínico) -->
+  <div id="lock-screen" class="lock-screen" hidden aria-modal="true" role="dialog" aria-labelledby="lock-title">
+    <div class="lock-backdrop" id="lock-backdrop"></div>
+    <div class="lock-panel" role="document">
+      <header class="lock-head">
+        <img class="lock-logo" src="/static/favicon.svg" alt="" width="46" height="46" />
+        <div class="lock-head-text">
+          <h2 id="lock-title">DermaMetric</h2>
+          <span class="lock-sub">Estação clínica — acesso restrito</span>
+        </div>
+      </header>
+      <div class="lock-body">
+        <!-- Setup: configurar primeira senha -->
+        <section id="lock-setup" class="lock-view" hidden>
+          <h3>Configurar Senha de Acesso</h3>
+          <p>Defina a senha que protegerá esta estação clínica.</p>
+          <div class="field">
+            <span>Nova senha de acesso</span>
+            <input id="setup-password" type="password" minlength="6" placeholder="Mínimo 6 caracteres" autocomplete="new-password" />
+          </div>
+          <div class="field">
+            <span>Confirmar senha</span>
+            <input id="setup-confirm" type="password" placeholder="Confirme a senha" autocomplete="new-password" />
+          </div>
+          <div class="lock-actions">
+            <button type="button" class="btn btn-primary" id="setup-save">Criar senha</button>
+          </div>
+          <p id="setup-error" class="lock-error" hidden></p>
+        </section>
+
+        <!-- Login: desbloquear -->
+        <section id="lock-login" class="lock-view">
+          <h3>Desbloquear DermaMetric</h3>
+          <p>Informe a senha de acesso para continuar.</p>
+          <div class="field">
+            <span>Senha de acesso</span>
+            <input id="login-password" type="password" placeholder="Senha" autocomplete="current-password" />
+          </div>
+          <div class="lock-actions">
+            <button type="button" class="btn btn-primary" id="login-ok">Desbloquear</button>
+          </div>
+          <button type="button" class="lock-link" id="forgot-password">Esqueci a senha</button>
+          <p id="login-error" class="lock-error" hidden></p>
+        </section>
+
+        <!-- Recuperação com arquivo-chave .dmkey ou código DMK -->
+        <section id="lock-recover" class="lock-view" hidden>
+          <h3>Recuperar acesso à estação</h3>
+          <p>
+            Use o arquivo-chave <strong>.dmkey</strong> que foi baixado na
+            configuração inicial (ou o código <strong>DMK-…</strong>) para
+            definir uma nova senha mestra sem perder os prontuários.
+          </p>
+
+          <label class="dmkey-drop" id="dmkey-drop" for="dmkey-file">
+            <input type="file" id="dmkey-file" accept=".dmkey,.json,application/json" hidden />
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4m0 0 4 4m-4-4L8 8" /><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" /></svg>
+            <strong>Selecionar arquivo .dmkey</strong>
+            <span>ou arraste o arquivo para cá</span>
+          </label>
+          <p id="dmkey-feedback" class="dmkey-feedback" hidden></p>
+
+          <div class="lock-separator"><span>ou digite o código</span></div>
+
+          <div class="field">
+            <span>Chave de recuperação</span>
+            <input id="recover-key" type="text" maxlength="30" placeholder="DMK-XXXX-XXXX-XXXX-XXXX" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="field">
+            <span>Nova senha mestra</span>
+            <input id="recover-password" type="password" minlength="6" placeholder="Mínimo 6 caracteres" autocomplete="new-password" />
+          </div>
+          <div class="field">
+            <span>Confirmar nova senha</span>
+            <input id="recover-confirm" type="password" minlength="6" placeholder="Repita a nova senha" autocomplete="new-password" />
+          </div>
+          <div class="lock-actions">
+            <button type="button" class="btn btn-ghost" id="recover-cancel">Voltar</button>
+            <button type="button" class="btn btn-primary" id="recover-submit">Redefinir e entrar</button>
+          </div>
+          <p id="recover-error" class="lock-error" hidden></p>
+        </section>
+
+        <!-- Arquivo-chave: exibido após setup, recuperação ou rotação -->
+        <section id="lock-keyfile" class="lock-view" hidden>
+          <h3 id="keyfile-title">Guarde sua chave de recuperação</h3>
+          <p id="keyfile-lead">
+            Este arquivo é a <strong>única forma</strong> de recuperar os
+            prontuários caso você esqueça a senha mestra. Guarde-o fora do
+            computador, em local seguro.
+          </p>
+          <div class="keyfile-card">
+            <span class="keyfile-label">Chave de recuperação</span>
+            <div class="keyfile-code" id="keyfile-code">DMK-XXXX-XXXX-XXXX-XXXX</div>
+            <div class="keyfile-meta">
+              <span id="keyfile-institution"></span>
+              <span id="keyfile-date"></span>
+            </div>
+            <div class="keyfile-actions">
+              <button type="button" class="btn btn-primary" id="keyfile-download">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v12m0 0 4-4m-4 4-4-4" /><path d="M4 20h16" /></svg>
+                Baixar Arquivo-Chave (.dmkey)
+              </button>
+              <button type="button" class="btn btn-ghost" id="keyfile-copy">Copiar código</button>
+              <button type="button" class="btn btn-ghost" id="keyfile-print">Imprimir ficha de emergência</button>
+            </div>
+          </div>
+          <label class="keyfile-confirm">
+            <input type="checkbox" id="keyfile-confirm" />
+            <span>Salvei o arquivo-chave ou imprimi a ficha em local seguro.</span>
+          </label>
+          <div class="lock-actions">
+            <button type="button" class="btn btn-primary" id="keyfile-done" disabled>Concluir e entrar</button>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <img class="brand-logo" src="/static/favicon.svg" alt="" width="38" height="38" />
+      </span>
+      <div class="brand-text">
+        <h1>DermaMetric</h1>
+        <p>Estação de fotogrametria clínica</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span id="health-badge" class="system-status is-pending" title="Status do sistema e criptografia em repouso (LGPD).">
+        <span class="pulse" aria-hidden="true"></span>
+        <span id="health-text">Conectando…</span>
+      </span>
+      <button id="help-open" class="btn btn-ghost help-open" type="button" title="Guia de uso e glossário metodológico — disponível offline" aria-label="Abrir Guia de Uso e Metodologia">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M9.4 9.2a2.7 2.7 0 0 1 5.2 1c0 1.8-2.6 2.1-2.6 3.6" />
+          <path d="M12 17.1h.01" />
+        </svg>
+        <span class="help-open-label">Guia &amp; Metodologia</span>
+      </button>
+      <button id="profile-open" class="btn btn-ghost profile-btn" type="button" title="Perfil do profissional responsável" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="8" r="4" />
+          <path d="M4 21a8 8 0 0 1 16 0" />
+        </svg>
+        <span id="profile-label">Configurar Profissional</span>
+      </button>
+      <button id="compare-open" class="btn btn-compare" type="button" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect width="18" height="18" x="3" y="3" rx="2" />
+          <path d="M12 3v18" />
+          <path d="M8 8h1M8 12h1M8 16h1M15 8h1M15 12h1M15 16h1" />
+        </svg>
+        <span>Comparativo Longitudinal &amp; Laudo</span>
+      </button>
+      <button id="auth-logout" class="btn btn-ghost" type="button" title="Sair / Bloquear estação" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+          <path d="m16 17 5-5-5-5" />
+          <path d="M21 12H9" />
+        </svg>
+        <span>Sair / Bloquear</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Diretório de Pacientes (tela inicial após login) -->
+  <section id="patient-directory" class="patient-directory" hidden aria-label="Pacientes cadastrados">
+    <div class="patient-dir-head">
+      <div>
+        <h2>Pacientes Cadastrados</h2>
+        <p class="patient-count" id="patient-count">0 pacientes</p>
+      </div>
+      <button type="button" class="btn btn-primary" id="patient-new" aria-label="Novo paciente">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+        <span>Novo Paciente</span>
+      </button>
+    </div>
+    <div class="patient-summary" id="patient-summary" aria-label="Resumo de pacientes"></div>
+    <div class="patient-filters" id="patient-filters" role="group" aria-label="Filtrar pacientes">
+      <button type="button" class="patient-filter is-active" data-filter="all" aria-pressed="true">Todos <span class="filter-count" id="filter-count-all">0</span></button>
+      <button type="button" class="patient-filter" data-filter="active" aria-pressed="false">Em acompanhamento <span class="filter-count" id="filter-count-active">0</span></button>
+      <button type="button" class="patient-filter" data-filter="locked" aria-pressed="false">Finalizados <span class="filter-count" id="filter-count-locked">0</span></button>
+    </div>
+    <div class="patient-search-row">
+      <div class="patient-search">
+        <input id="patient-search" type="search" placeholder="Buscar por código (ex: PAC-01) ou iniciais..." aria-label="Buscar pacientes" />
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" /></svg>
+      </div>
+      <button type="button" id="privacy-toggle" class="privacy-toggle is-sigil" aria-pressed="true" title="Modo sigilo ativo: os nomes ficam ocultos">
+        <svg class="privacy-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" /><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" /><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" /><path d="m1 1 22 22" /></svg>
+        <span id="privacy-toggle-label">Modo sigilo ativo</span>
+      </button>
+    </div>
+    <div class="patient-list" id="patient-list" role="list" aria-label="Lista de pacientes"></div>
+    <div class="patient-empty" id="patient-empty" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3" /><path d="m17 8-5-5-5 5" /><path d="M12 3v12" /></svg>
+      <h3>Nenhum paciente cadastrado</h3>
+      <p>Clique em <strong>+ Novo Paciente</strong> para criar o primeiro prontuário.</p>
+    </div>
+  </section>
+
+  <!-- Modal Perfil do Profissional -->
+  <div id="profile-modal" class="modal" hidden aria-hidden="true">
+    <div class="modal-backdrop" data-close-profile></div>
+    <div class="modal-window profile-modal" role="dialog" aria-modal="true" aria-labelledby="profile-title">
+      <header class="modal-head">
+        <div>
+          <span class="eyebrow">Responsável técnico</span>
+          <h2 id="profile-title">Perfil do Profissional</h2>
+        </div>
+        <button class="icon-btn" type="button" data-close-profile title="Fechar" aria-label="Fechar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
+        </button>
+      </header>
+      <div class="modal-body">
+        <form id="profile-form" class="form-stack" novalidate>
+          <p class="form-hint">Estes dados aparecem no cabeçalho e na assinatura dos laudos em PDF.</p>
+          <div class="field">
+            <span>Nome do profissional</span>
+            <input id="profile-name" type="text" maxlength="120" placeholder="ex.: Dra. Maria Silva" />
+            <small>Nome completo do responsável técnico.</small>
+          </div>
+          <div class="field">
+            <span>Registro profissional</span>
+            <input id="profile-registry" type="text" maxlength="80" placeholder="ex.: CREFITO-6 123456-F ou CRM-CE 12345" />
+            <small>Conselho, número e UF.</small>
+          </div>
+          <div class="field">
+            <span>Instituição (opcional)</span>
+            <input id="profile-institution" type="text" maxlength="120" placeholder="ex.: Clínica / Universidade" />
+          </div>
+          <p id="profile-error" class="form-hint is-error" hidden></p>
+          <div class="form-actions">
+            <button type="button" class="btn btn-ghost" data-close-profile>Cancelar</button>
+            <button type="submit" class="btn btn-primary">Salvar perfil</button>
+          </div>
+        </form>
+
+        <section class="security-section" aria-labelledby="security-title">
+          <div class="security-head">
+            <h3 id="security-title">Segurança e Recuperação</h3>
+            <span class="security-meta" id="security-meta">Chave ativa: —</span>
+          </div>
+
+          <form id="password-form" class="form-stack" novalidate>
+            <p class="form-hint">Trocar a senha mestra não altera os prontuários nem invalida o arquivo-chave atual.</p>
+            <div class="field">
+              <span>Senha mestra atual</span>
+              <input id="password-current" type="password" autocomplete="current-password" />
+            </div>
+            <div class="field">
+              <span>Nova senha mestra</span>
+              <input id="password-new" type="password" minlength="6" placeholder="Mínimo 6 caracteres" autocomplete="new-password" />
+            </div>
+            <div class="field">
+              <span>Confirmar nova senha</span>
+              <input id="password-confirm" type="password" minlength="6" placeholder="Repita a nova senha" autocomplete="new-password" />
+            </div>
+            <p id="password-error" class="form-hint is-error" hidden></p>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-soft">Alterar senha mestra</button>
+            </div>
+          </form>
+
+          <div class="security-block">
+            <strong>Arquivo-chave (.dmkey)</strong>
+            <p class="form-hint">Gere um novo arquivo se perdeu o anterior. A chave anterior deixa de funcionar.</p>
+            <div class="field">
+              <span>Senha mestra</span>
+              <input id="recovery-password" type="password" autocomplete="current-password" />
+            </div>
+            <p id="recovery-error" class="form-hint is-error" hidden></p>
+            <div class="form-actions">
+              <button type="button" class="btn btn-primary" id="regenerate-key">Gerar / Baixar novo .dmkey</button>
+            </div>
+            <div id="recovery-result" class="recovery-result" hidden>
+              <span class="keyfile-label">Nova chave — guarde agora</span>
+              <code id="recovery-result-code"></code>
+            </div>
+          </div>
+        </section>
+
+        <section class="security-section backup-section" aria-labelledby="backup-title">
+          <div class="security-head">
+            <h3 id="backup-title">Backup e Restauração (.dmbak)</h3>
+            <span class="security-meta">AES-256 · PBKDF2 · HMAC-SHA256</span>
+          </div>
+
+          <div class="security-block">
+            <strong>Exportar backup completo</strong>
+            <p class="form-hint">Gera um arquivo <span class="mono">.dmbak</span> cifrado com todos os prontuários, imagens, medições e escalas clínicas.</p>
+            <div class="field">
+              <span>Senha mestra</span>
+              <input id="backup-export-password" type="password" autocomplete="current-password" placeholder="Confirme a senha mestra" />
+            </div>
+            <p id="backup-export-error" class="form-hint is-error" hidden></p>
+            <div class="form-actions">
+              <button type="button" class="btn btn-primary" id="backup-export-full">Exportar Backup Completo (.dmbak)</button>
+            </div>
+          </div>
+
+          <div class="security-block">
+            <strong>Restaurar arquivo</strong>
+            <p class="form-hint">Inspecione o conteúdo antes de importar. Um snapshot <span class="mono">pre_restore_*.dmbak</span> é criado automaticamente antes de qualquer gravação.</p>
+            <label class="backup-file-input" for="backup-file">
+              <span>Selecionar arquivo .dmbak</span>
+              <input id="backup-file" type="file" accept=".dmbak,application/vnd.dermametric.backup" />
+            </label>
+            <div class="field">
+              <span>Senha mestra do arquivo</span>
+              <input id="backup-restore-password" type="password" autocomplete="off" placeholder="Senha usada na exportação" />
+            </div>
+            <p id="backup-restore-error" class="form-hint is-error" hidden></p>
+            <div class="form-actions">
+              <button type="button" class="btn btn-soft" id="backup-inspect">Inspecionar arquivo</button>
+            </div>
+            <div id="backup-preview" class="backup-preview" hidden></div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- Guia de Uso & Metodologia (ajuda offline) -->
+  <div id="help-modal" class="modal" hidden aria-hidden="true">
+    <div class="modal-backdrop" data-close-help></div>
+    <div class="modal-window help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title" tabindex="-1">
+      <header class="modal-head">
+        <div>
+          <span class="eyebrow">Ajuda integrada · funciona offline</span>
+          <h2 id="help-title">Guia de Uso &amp; Metodologia</h2>
+        </div>
+        <div class="modal-head-actions">
+          <button class="icon-btn" type="button" data-close-help title="Fechar ajuda" aria-label="Fechar ajuda">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="help-toolbar">
+        <div class="segmented help-tabs" role="tablist" aria-label="Seções da ajuda">
+          <button type="button" role="tab" id="help-tab-guide" data-help-tab="guide" class="is-active" aria-selected="true" aria-controls="help-guide">
+            Guia Prático de Uso
+            <span class="help-count" id="help-count-guide">6</span>
+          </button>
+          <button type="button" role="tab" id="help-tab-glossary" data-help-tab="glossary" aria-selected="false" aria-controls="help-glossary">
+            Glossário Técnico
+            <span class="help-count" id="help-count-glossary">16</span>
+          </button>
+        </div>
+        <div class="help-search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" /></svg>
+          <input id="help-search" type="search" placeholder="Filtrar termos e etapas…" aria-label="Filtrar conteúdo da ajuda" autocomplete="off" />
+        </div>
+      </div>
+
+      <div id="help-body" class="help-body">
+        <section id="help-guide" class="help-panel" role="tabpanel" aria-labelledby="help-tab-guide">
+          <div class="help-panel-head">
+            <h3>Do primeiro cadastro ao laudo final</h3>
+            <p>Seis blocos curtos, na ordem em que a estação deve ser operada. Cada passo corresponde a uma etapa real do fluxo clínico.</p>
+          </div>
+          <div class="help-flow" aria-hidden="true">
+            <span>Captura</span><i>→</i><span>Passo 1</span><i>→</i><span>Passo 2</span><i>→</i><span>Passo 3</span><i>→</i><span>Passo 4</span><i>→</i><span>Laudo</span>
+          </div>
+
+          <p id="help-empty-guide" class="help-empty" hidden>Nenhum item do guia corresponde à busca.</p>
+
+          <article class="help-entry" id="help-guide-captura" data-help-entry tabindex="-1" data-help-search="foto iluminacao flash angulo distancia regua captura qualidade sombra">
+            <div class="help-entry-head">
+              <span class="help-step is-zero">0</span>
+              <div>
+                <h3>Boas práticas de captura</h3>
+                <p class="help-kicker">Antes de fotografar — vale para todas as sessões</p>
+              </div>
+            </div>
+            <ul class="help-list">
+              <li><strong>Iluminação difusa e uniforme:</strong> prefira luz indireta; evite flash direto, contraluz e sombras duras sobre a pele.</li>
+              <li><strong>Mesmo ângulo e distância</strong> entre T0 e as sessões de acompanhamento — de preferência com apoio fixo para a câmera.</li>
+              <li><strong>Régua milimetrada no mesmo plano da pele</strong> e visível na foto de captura. Ela é a base da escala em <span class="math">px/mm</span>.</li>
+              <li><strong>Sem filtros, zoom digital ou edição.</strong> A foto limpa deve ter o mesmo enquadramento da foto com régua.</li>
+              <li>Registre <strong>sinais e marcos anatômicos</strong> nítidos: eles serão reutilizados no alinhamento.</li>
+            </ul>
+          </article>
+
+          <article class="help-entry" id="help-guide-passo1" data-help-entry tabindex="-1" data-help-search="passo 1 prontuario paciente t0 baseline sessao acompanhamento t1 t2 novo paciente upload foto regua">
+            <div class="help-entry-head">
+              <span class="help-step">1</span>
+              <div>
+                <h3>Captura &amp; Sessões</h3>
+                <p class="help-kicker">Criar prontuário e enviar o par fotográfico</p>
+              </div>
+            </div>
+            <ul class="help-list">
+              <li>Em <strong>+ Novo Paciente</strong>, informe código, nome e o plano de sessões (3 a 6).</li>
+              <li>A sessão inicial é o <strong><span class="math">T0 (Baseline)</span></strong>: define a geometria e a referência de cor de todo o estudo.</li>
+              <li>As sessões seguintes (<span class="math">T1, T2…</span>) são de acompanhamento e serão comparadas ao T0.</li>
+              <li>Envie a <strong>foto com régua</strong> e a <strong>foto limpa</strong>. A foto limpa alimenta o canvas clínico; a com régua serve à calibração.</li>
+            </ul>
+            <button type="button" class="help-jump" data-help="help-guide-passo2">Próximo: calibração espacial →</button>
+          </article>
+
+          <article class="help-entry" id="help-guide-passo2" data-help-entry tabindex="-1" data-help-search="passo 2 calibracao escala px mm regua pontos distancia real">
+            <div class="help-entry-head">
+              <span class="help-step">2</span>
+              <div>
+                <h3>Calibração Espacial</h3>
+                <p class="help-kicker">Converter pixels em milímetros</p>
+              </div>
+            </div>
+            <ul class="help-list">
+              <li>Clique em <strong>dois pontos</strong> sobre a régua milimetrada exibida na foto (quanto maior o trecho, menor o erro).</li>
+              <li>Informe a <strong>distância real</strong> entre esses pontos, em milímetros — por exemplo, 50 mm.</li>
+              <li>A estação calcula a escala em <span class="math">px/mm</span> e aceita a faixa plausível de 1,5 a 50 <span class="math">px/mm</span>.</li>
+              <li>Confira o valor registrado antes de avançar: toda a morfometria depende dessa escala.</li>
+            </ul>
+            <button type="button" class="help-jump" data-help="help-glossary-fotogrametria">Ver definição de fotogrametria →</button>
+          </article>
+
+          <article class="help-entry" id="help-guide-passo3" data-help-entry tabindex="-1" data-help-search="passo 3 alinhamento anatomico fotometrico marcos landmarks roi pele saudavel cielab clahe homografia">
+            <div class="help-entry-head">
+              <span class="help-step">3</span>
+              <div>
+                <h3>Alinhamento Anatômico &amp; Fotométrico</h3>
+                <p class="help-kicker">Sobrepor a mesma região e neutralizar a luz</p>
+              </div>
+            </div>
+            <ul class="help-list">
+              <li>Marque <strong>pelo menos 4 marcos anatômicos</strong> fixos — umbigo, sinais, proeminências ósseas — sempre <strong>na mesma ordem do T0</strong>.</li>
+              <li>Desenhe a <strong>ROI retangular de pele saudável</strong> sobre área íntegra, sem lesões e sem sombras fortes.</li>
+              <li>Processe o alinhamento: a homografia projeta a sessão sobre o T0 e a normalização fotométrica corrige exposição e balanço de branco.</li>
+              <li>O realce <strong>CIELAB + CLAHE</strong> atua apenas no canal de luminosidade, sem alterar as cores reais.</li>
+            </ul>
+            <button type="button" class="help-jump" data-help="help-glossary-homografia">Como funciona a homografia →</button>
+          </article>
+
+          <article class="help-entry" id="help-guide-passo4" data-help-entry tabindex="-1" data-help-search="passo 4 medicao poligono area comprimento largura delta e00 end likert gais escalas">
+            <div class="help-entry-head">
+              <span class="help-step">4</span>
+              <div>
+                <h3>Medição &amp; Escalas Clínicas</h3>
+                <p class="help-kicker">Morfometria objetiva + percepção clínica</p>
+              </div>
+            </div>
+            <ul class="help-list">
+              <li>Selecione a região-alvo e clique nos vértices do <strong>polígono</strong> acompanhando o contorno da estria; duplo clique fecha e mede.</li>
+              <li>Leia automaticamente <strong>Área (<span class="math">mm²</span>), Comprimento, Largura média/máxima</strong> e <strong><span class="math">ΔE00</span></strong> vs. pele saudável.</li>
+              <li>Preencha as escalas <strong>END</strong> (dor 0–10), <strong>Likert</strong> (satisfação 1–5) e <strong>GAIS</strong> (−1 a +3).</li>
+              <li>Salve as escalas da sessão antes de mudar de T0 para T1, T2…</li>
+            </ul>
+            <button type="button" class="help-jump" data-help="help-glossary-morfometria">Ver cálculo de área →</button>
+          </article>
+
+          <article class="help-entry" id="help-guide-comparativo" data-help-entry tabindex="-1" data-help-search="comparativo longitudinal avaliacao cega laudo pdf hash sha256 pin backup dmkey seguranca">
+            <div class="help-entry-head">
+              <span class="help-step is-final">✓</span>
+              <div>
+                <h3>Comparativo, Avaliação Cega &amp; Laudo</h3>
+                <p class="help-kicker">Fechar o ciclo documental</p>
+              </div>
+            </div>
+            <ul class="help-list">
+              <li>Abra <strong>Comparativo Longitudinal &amp; Laudo</strong> para a cortina antes/depois e a matriz de evolução por métrica.</li>
+              <li>Ative a <strong>avaliação cega</strong>: as imagens aparecem sem identificação temporal para reduzir o viés de confirmação do GAIS.</li>
+              <li>Exporte o <strong>laudo PDF</strong> com assinatura do profissional, perfil da clínica e <strong>fingerprint SHA-256</strong> dos registros.</li>
+              <li>Finalize e proteja o prontuário com <strong>PIN</strong> (4–6 dígitos). Se esquecer o PIN, redefina com a <strong>senha mestra</strong>.</li>
+              <li>Mantenha o backup do arquivo <strong><span class="mono">.dmkey</span></strong> fora do computador: é a única forma de recuperar a senha sem perder dados.</li>
+            </ul>
+          </article>
+        </section>
+
+        <section id="help-glossary" class="help-panel" role="tabpanel" aria-labelledby="help-tab-glossary" hidden>
+          <div class="help-panel-head">
+            <h3>Glossário técnico e metodológico</h3>
+            <p>Conceitos de visão computacional, fotogrametria clínica, colorimetria e segurança aplicados à estação.</p>
+          </div>
+          <p id="help-empty-glossary" class="help-empty" hidden>Nenhum termo do glossário corresponde à busca.</p>
+
+          <div class="help-group" data-help-group>
+            <h4 class="help-group-title">1. Processamento de Imagem e Colorimetria</h4>
+
+            <article class="help-entry" id="help-glossary-roi" data-help-entry tabindex="-1" data-help-search="roi region of interest regiao de interesse pele saudavel lesao retangulo poligono">
+              <h3>ROI — <em>Region of Interest</em></h3>
+              <p>Recorte delimitado da imagem onde o algoritmo calcula métricas, ignorando roupas, fundo e sombras externas.</p>
+              <ul class="help-list">
+                <li><strong>ROI de pele saudável:</strong> retângulo sobre pele íntegra e iluminação uniforme. É a amostra de referência para a normalização fotométrica entre <span class="math">T0 → Tn</span> e a base de comparação de cor.</li>
+                <li><strong>ROI da lesão (estria):</strong> polígono fechado ao redor da estria, usado para área, comprimento, largura e colorimetria.</li>
+              </ul>
+            </article>
+
+            <article class="help-entry" id="help-glossary-cielab" data-help-entry tabindex="-1" data-help-search="cielab lab l a b luminosidade eritema vascularizacao melanina pigmentacao cor">
+              <h3>Espaço de Cor CIELAB (<span class="math">L*a*b*</span>)</h3>
+              <p>Modelo da CIE projetado para ser <strong>perceptualmente uniforme</strong>: distâncias numéricas correspondem à diferença percebida pelo olho humano, separando luminosidade de crominância.</p>
+              <ul class="help-list">
+                <li><strong><span class="math">L*</span> (Lightness):</strong> de 0 (preto) a 100 (branco difuso). Isola exposição e sombra.</li>
+                <li><strong><span class="math">a*</span> (verde–vermelho):</strong> valores positivos tendem ao vermelho/magenta e refletem <strong>eritema e vascularização</strong>, elevados em estrias rubras recentes.</li>
+                <li><strong><span class="math">b*</span> (azul–amarelo):</strong> valores positivos tendem ao amarelo e refletem <strong>melanina, pigmentação e subtom cutâneo</strong>.</li>
+              </ul>
+            </article>
+
+            <article class="help-entry" id="help-glossary-clahe" data-help-entry tabindex="-1" data-help-search="clahe contraste histograma equalizacao tiles clip limit textura luminosidade">
+              <h3>CLAHE — <em>Contrast Limited Adaptive Histogram Equalization</em></h3>
+              <p>Realce local de contraste em três etapas:</p>
+              <ol class="help-list is-numbered">
+                <li>Divide a imagem em blocos (<em>tiles</em>), por exemplo <span class="math">8 × 8</span>.</li>
+                <li>Equaliza o histograma de cada bloco, evidenciando microtexturas e bordas sutis.</li>
+                <li>Aplica um limite de corte (<em>clip limit</em>) que redistribui picos e evita amplificar ruído granuloso.</li>
+              </ol>
+              <p class="help-note"><strong>No DermaMetric:</strong> atua somente no canal <span class="math">L*</span>, aumentando a nitidez estrutural da estria sem alterar <span class="math">a*</span> e <span class="math">b*</span>.</p>
+            </article>
+
+            <article class="help-entry" id="help-glossary-normalizacao" data-help-entry tabindex="-1" data-help-search="normalizacao fotometrica exposicao balanco de branco flash iluminacao referencia t0">
+              <h3>Normalização Fotométrica</h3>
+              <p>Corrige exposição e balanço de branco entre datas diferentes (<span class="math">T0, T1, T2…</span>). Calcula a média dos canais <span class="math">L*, a*, b*</span> na ROI de pele saudável de <span class="math">Tn</span> e ajusta a imagem para coincidir com a ROI de referência de <span class="math">T0</span>.</p>
+              <p class="help-note"><strong>Objetivo:</strong> impedir que variações de flash ou luz ambiente falseiem a evolução clínica da cor.</p>
+            </article>
+
+            <article class="help-entry" id="help-glossary-deltae" data-help-entry tabindex="-1" data-help-search="delta e deltae00 ciede2000 diferenca de cor contraste eritema limiar">
+              <h3>Diferença de Cor <span class="math">ΔE00</span> (CIEDE2000)</h3>
+              <p>Métrica ISO/CIE que quantifica a distância perceptual entre duas cores em <span class="math">L*a*b*</span>, corrigindo não uniformidades em regiões saturadas e neutras.</p>
+              <div class="math math-block" role="img" aria-label="Fórmula CIEDE2000 completa">
+                ΔE<sub>00</sub> = √[ (ΔL′ / k<sub>L</sub>S<sub>L</sub>)² + (ΔC′ / k<sub>C</sub>S<sub>C</sub>)² + (ΔH′ / k<sub>H</sub>S<sub>H</sub>)² + R<sub>T</sub> · (ΔC′ / k<sub>C</sub>S<sub>C</sub>)(ΔH′ / k<sub>H</sub>S<sub>H</sub>) ]
+              </div>
+              <p><strong>No DermaMetric:</strong> distância entre a média interna da estria e a média da pele saudável adjacente.</p>
+              <ul class="help-list">
+                <li><span class="math">ΔE00 &lt; 1,0</span> — imperceptível ao olho humano.</li>
+                <li><span class="math">1,0 ≤ ΔE00 &lt; 3,5</span> — diferença sutil, visível em comparação direta.</li>
+                <li><span class="math">ΔE00 ≥ 3,5</span> — contraste cromático evidente.</li>
+              </ul>
+              <p class="help-note"><strong>Evolução esperada:</strong> redução progressiva de <span class="math">ΔE00</span> ao longo de <span class="math">T0 → Tn</span> indica homogeneização da estria com o tecido sadio.</p>
+            </article>
+          </div>
+
+          <div class="help-group" data-help-group>
+            <h4 class="help-group-title">2. Geometria, Alinhamento e Morfometria</h4>
+
+            <article class="help-entry" id="help-glossary-fotogrametria" data-help-entry tabindex="-1" data-help-search="fotogrametria escala px mm regua calibracao milimetros">
+              <h3>Fotogrametria Clínica</h3>
+              <p>Obtém grandezas físicas reais (mm e mm²) a partir de fotos 2D, usando uma calibração espacial conhecida. A escala é definida no Passo 2 ao marcar dois pontos da régua no mesmo plano anatômico da lesão:</p>
+              <div class="math math-block" role="img" aria-label="Escala em pixels por milímetro">
+                Escala (px/mm) = √[(x₂ − x₁)² + (y₂ − y₁)²] ÷ d<sub>real (mm)</sub>
+              </div>
+            </article>
+
+            <article class="help-entry" id="help-glossary-landmarks" data-help-entry tabindex="-1" data-help-search="marcos anatomicos landmarks umbigo sinais nevos pontos fixos ordem">
+              <h3>Marcos Anatômicos (<em>Landmarks</em>)</h3>
+              <p>Pontos fixos e reproduzíveis da anatomia — cicatriz umbilical, nevos, proeminências ósseas — marcados em todas as sessões (<span class="math">T0 … Tn</span>) <strong>na mesma ordem</strong>. Funcionam como âncoras do registro geométrico.</p>
+            </article>
+
+            <article class="help-entry" id="help-glossary-homografia" data-help-entry tabindex="-1" data-help-search="homografia matriz 3x3 transformacao projetiva alinhamento rotacao inclinacao">
+              <h3>Homografia (Transformação Projetiva 2D)</h3>
+              <p>Matriz <span class="math">H ∈ ℝ³ˣ³</span> que mapeia coordenadas homogêneas de <span class="math">Tn</span> para o plano de <span class="math">T0</span>:</p>
+              <div class="math math-matrix-wrap" role="img" aria-label="Matriz de homografia 3 por 3 aplicada a coordenadas homogêneas">
+                <table class="math-matrix">
+                  <tr><td>x′</td></tr><tr><td>y′</td></tr><tr><td>w′</td></tr>
+                </table>
+                <span class="math-op">=</span>
+                <table class="math-matrix">
+                  <tr><td>h<sub>11</sub></td><td>h<sub>12</sub></td><td>h<sub>13</sub></td></tr>
+                  <tr><td>h<sub>21</sub></td><td>h<sub>22</sub></td><td>h<sub>23</sub></td></tr>
+                  <tr><td>h<sub>31</sub></td><td>h<sub>32</sub></td><td>1</td></tr>
+                </table>
+                <table class="math-matrix">
+                  <tr><td>x</td></tr><tr><td>y</td></tr><tr><td>1</td></tr>
+                </table>
+              </div>
+              <div class="math math-block">x<sub>T0</sub> = x′ / w′ &nbsp;·&nbsp; y<sub>T0</sub> = y′ / w′</div>
+              <ul class="help-list">
+                <li><strong>Requisitos:</strong> no mínimo <strong>4 pares de pontos não colineares</strong> (8 graus de liberdade).</li>
+                <li><strong>Finalidade:</strong> corrige distância, rotação e inclinação da câmera entre consultas, sobrepondo exatamente a mesma região anatômica.</li>
+              </ul>
+            </article>
+
+            <article class="help-entry" id="help-glossary-morfometria" data-help-entry tabindex="-1" data-help-search="morfometria area gauss shoelace comprimento largura poligono mm2">
+              <h3>Morfometria da Lesão</h3>
+              <p>Quantificação objetiva das dimensões de cada estria segmentada. A área vem dos vértices do polígono pela fórmula de Gauss (<em>Shoelace</em>) e é convertida para mm² pela escala:</p>
+              <div class="math math-block" role="img" aria-label="Fórmula de Gauss para área do polígono">
+                A<sub>px</sub> = ½ · |Σ<sub>i=1…n</sub> (x<sub>i</sub> y<sub>i+1</sub> − x<sub>i+1</sub> y<sub>i</sub>)| &nbsp;·&nbsp; A<sub>mm²</sub> = A<sub>px</sub> ÷ (px/mm)²
+              </div>
+              <ul class="help-list">
+                <li><strong>Comprimento (mm):</strong> extensão longitudinal do eixo principal da lesão.</li>
+                <li><strong>Largura média e máxima (mm):</strong> espessura transversal média e pico ao longo do eixo — indicador de retração cicatricial.</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="help-group" data-help-group>
+            <h4 class="help-group-title">3. Avaliação Clínica Subjetiva e Metodologia</h4>
+
+            <article class="help-entry" id="help-glossary-baseline" data-help-entry tabindex="-1" data-help-search="baseline t0 seguimento follow up tn sessao inicial comparacao longitudinal">
+              <h3>Baseline (<span class="math">T0</span>) e Seguimento (<span class="math">T1…Tn</span>)</h3>
+              <ul class="help-list">
+                <li><strong><span class="math">T0</span> (Baseline):</strong> sessão inicial pré-intervenção; define o sistema de coordenadas e a referência fotométrica de todas as avaliações.</li>
+                <li><strong><span class="math">Tn</span> (follow-up):</strong> sessões periódicas pós-procedimento, projetadas sobre T0 para comparação longitudinal pareada.</li>
+              </ul>
+            </article>
+
+            <article class="help-entry" id="help-glossary-end" data-help-entry tabindex="-1" data-help-search="end dor escala numerica 0 10 desconforto">
+              <h3>END — Escala Numérica de Dor</h3>
+              <p>Instrumento unidimensional de <strong>0</strong> (ausência de dor) a <strong>10</strong> (pior dor imaginável), para monitorar desconforto durante ou após o protocolo.</p>
+            </article>
+
+            <article class="help-entry" id="help-glossary-likert" data-help-entry tabindex="-1" data-help-search="likert satisfacao 1 5 percepcao resultado estetico">
+              <h3>Escala Likert de Satisfação</h3>
+              <p>Escala ordinal de <strong>1</strong> (muito insatisfeita) a <strong>5</strong> (muito satisfeita) que registra a percepção da paciente sobre o resultado estético.</p>
+            </article>
+
+            <article class="help-entry" id="help-glossary-gais" data-help-entry tabindex="-1" data-help-search="gais global aesthetic improvement escala -1 0 +1 +2 +3 melhora">
+              <h3>GAIS — <em>Global Aesthetic Improvement Scale</em></h3>
+              <p>Escala clínica padronizada de 5 pontos:</p>
+              <div class="gais-mini" aria-label="Valores da escala GAIS">
+                <span><b>−1</b> piora</span>
+                <span><b>0</b> inalterado</span>
+                <span><b>+1</b> melhora</span>
+                <span><b>+2</b> muita melhora</span>
+                <span><b>+3</b> melhora ótima</span>
+              </div>
+            </article>
+
+            <article class="help-entry" id="help-glossary-cega" data-help-entry tabindex="-1" data-help-search="avaliacao cega blinded assessment vies confirmacao ordem aleatoria antes depois">
+              <h3>Avaliação Cega (<em>Blinded Assessment</em>)</h3>
+              <p>As imagens de <span class="math">T0</span> e <span class="math">Tn</span> são exibidas lado a lado em <strong>ordem aleatória e sem identificação temporal</strong>, reduzindo o viés de confirmação do avaliador ao atribuir o escore GAIS.</p>
+            </article>
+          </div>
+
+          <div class="help-group" data-help-group>
+            <h4 class="help-group-title">4. Segurança, Integridade e Conformidade (LGPD)</h4>
+
+            <article class="help-entry" id="help-glossary-criptografia" data-help-entry tabindex="-1" data-help-search="criptografia fernet aes 128 cbc hmac sha256 lgpd dados em repouso senha mestra">
+              <h3>Criptografia Simétrica em Repouso (Fernet / AES)</h3>
+              <p>Protege dados sensíveis gravados em disco — imagens clínicas e metadados — atendendo aos princípios da <strong>LGPD (Lei nº 13.709/2018)</strong>.</p>
+              <ul class="help-list">
+                <li><strong>AES-128-CBC:</strong> cifra arquivos e campos do banco antes da gravação.</li>
+                <li><strong>HMAC-SHA256:</strong> autentica a mensagem e detecta alteração ou corrupção do conteúdo cifrado.</li>
+                <li><strong>Senha mestra e chave de recuperação:</strong> embrulham a DEK da estação; nunca são gravadas em texto puro.</li>
+              </ul>
+            </article>
+
+            <article class="help-entry" id="help-glossary-hash" data-help-entry tabindex="-1" data-help-search="fingerprint hash sha256 integridade laudo pdf impressao digital auditoria">
+              <h3>Fingerprint de Integridade (Hash SHA-256)</h3>
+              <p>Resumo criptográfico unidirecional dos dados consolidados do paciente, sessões e medições no instante da emissão do laudo PDF. Funciona como uma “impressão digital” documental: permite verificar se o relatório exportado corresponde fielmente aos registros originais da estação.</p>
+            </article>
+          </div>
+        </section>
+      </div>
+
+      <footer class="help-foot">
+        <span class="help-foot-dot" aria-hidden="true"></span>
+        Conteúdo embarcado na estação — nenhum dado clínico é enviado à internet.
+      </footer>
+    </div>
+  </div>
+
+  <!-- Modal Novo Paciente -->
+  <div id="patient-modal" class="modal" hidden aria-hidden="true">
+    <div class="modal-backdrop" data-close-patient-modal></div>
+    <div class="modal-window form-modal" role="dialog" aria-modal="true" aria-labelledby="patient-modal-title">
+      <header class="modal-head">
+        <div>
+          <span class="eyebrow">Cadastro</span>
+          <h2 id="patient-modal-title">Novo Paciente</h2>
+        </div>
+        <button class="icon-btn" type="button" data-close-patient-modal title="Fechar" aria-label="Fechar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
+        </button>
+      </header>
+      <div class="modal-body">
+        <form id="patient-form" class="form-stack" novalidate>
+          <div class="patient-code-hint info-banner">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2" /><path d="M9 20h6" /><path d="M12 3v17" /></svg>
+            <span>Código único <strong id="patient-code-preview">PAC-XXXXXX</strong> gerado automaticamente. Não é sequencial e não expõe a ordem de cadastro.</span>
+          </div>
+          <div class="field">
+            <span>Nome completo</span>
+            <input id="patient-name" type="text" maxlength="120" required placeholder="Nome completo do paciente" />
+          </div>
+          <div class="field">
+            <span>Observações clínicas</span>
+            <textarea id="patient-notes" rows="3" maxlength="2000" placeholder="Antecedentes, alergias, medicamentos em uso…"></textarea>
+            <small>Dados sensíveis: gravados cifrados e liberados apenas com a senha mestra em “Dados pessoais”.</small>
+          </div>
+          <div class="field">
+            <span>Número de sessões</span>
+            <select id="patient-sessions" required>
+              <option value="3">3 sessões (T0, T1, T2)</option>
+              <option value="4">4 sessões (T0, T1, T2, T3)</option>
+              <option value="5" selected>5 sessões (T0, T1, T2, T3, T4)</option>
+              <option value="6">6 sessões (T0, T1, T2, T3, T4, T5)</option>
+            </select>
+            <small>Gera T0 como baseline e T1..Tn sequencialmente.</small>
+          </div>
+          <p id="patient-form-error" class="form-hint is-error" hidden></p>
+          <div class="form-actions">
+            <button type="button" class="btn btn-ghost" data-close-patient-modal>Cancelar</button>
+            <button type="submit" class="btn btn-primary">Criar paciente</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal PIN do paciente -->
+  <div id="pin-modal" class="modal" hidden aria-hidden="true">
+    <div class="modal-backdrop" data-close-pin></div>
+    <div class="modal-window pin-modal" role="dialog" aria-modal="true" aria-labelledby="pin-title">
+      <header class="modal-head">
+        <div>
+          <span class="eyebrow">Proteção individual</span>
+          <h2 id="pin-title">Prontuário protegido por PIN</h2>
+        </div>
+      </header>
+      <div class="modal-body">
+        <p>Este prontuário está protegido por PIN. Informe o PIN para acessar.</p>
+        <div class="field">
+          <span>PIN (4-6 dígitos)</span>
+          <input id="pin-input" type="password" maxlength="6" minlength="4" inputmode="numeric" placeholder="0000" autocomplete="one-time-code" />
+        </div>
+        <p id="pin-error" class="form-hint is-error" hidden></p>
+        <div class="form-actions">
+          <button type="button" class="btn btn-ghost" data-close-pin>Cancelar</button>
+          <button type="button" class="btn btn-primary" id="pin-ok">Desbloquear</button>
+        </div>
+
+        <button type="button" class="pin-forgot" id="pin-forgot">Esqueci o PIN</button>
+
+        <div id="pin-reset" class="pin-reset" hidden>
+          <p class="form-hint">Confirme a senha mestra da estação para redefinir ou remover o PIN deste prontuário.</p>
+          <div class="field">
+            <span>Senha mestra da estação</span>
+            <input id="pin-reset-password" type="password" autocomplete="current-password" />
+          </div>
+          <div class="field">
+            <span>Novo PIN (4-6 dígitos)</span>
+            <input id="pin-reset-new" type="text" maxlength="6" inputmode="numeric" placeholder="0000" autocomplete="new-password" />
+          </div>
+          <p id="pin-reset-error" class="form-hint is-error" hidden></p>
+          <div class="form-actions">
+            <button type="button" class="btn btn-ghost" id="pin-remove">Remover PIN</button>
+            <button type="button" class="btn btn-primary" id="pin-reset-ok">Redefinir PIN</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal Finalizar e Proteger -->
+  <div id="lock-patient-modal" class="modal" hidden aria-hidden="true">
+    <div class="modal-backdrop" data-close-lock-patient></div>
+    <div class="modal-window pin-modal" role="dialog" aria-modal="true" aria-labelledby="lock-patient-title">
+      <header class="modal-head">
+        <div>
+          <span class="eyebrow">Finalizar atendimento</span>
+          <h2 id="lock-patient-title">Finalizar e Proteger</h2>
+        </div>
+      </header>
+      <div class="modal-body">
+        <p>Deseja proteger este prontuário com um PIN individual antes de atender o próximo paciente?</p>
+        <div class="field">
+          <span>PIN opcional (4-6 dígitos)</span>
+          <input id="lock-pin-input" type="password" maxlength="6" minlength="4" inputmode="numeric" placeholder="Deixe em branco para não proteger" autocomplete="new-password" />
+        </div>
+        <p class="form-hint">O PIN será solicitado na próxima vez que este paciente for aberto.</p>
+        <div class="form-actions">
+          <button type="button" class="btn btn-ghost" data-close-lock-patient>Voltar</button>
+          <button type="button" class="btn btn-primary" id="lock-patient-ok">Finalizar e Proteger</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal Dados Pessoais (protegido pela senha mestra) -->
+  <div id="personal-data-modal" class="modal" hidden aria-hidden="true">
+    <div class="modal-backdrop" data-close-personal></div>
+    <div class="modal-window form-modal personal-modal" role="dialog" aria-modal="true" aria-labelledby="personal-title">
+      <header class="modal-head">
+        <div>
+          <span class="eyebrow">Sigilo médico · LGPD</span>
+          <h2 id="personal-title">Dados Pessoais do Paciente · <span id="personal-code">—</span></h2>
+        </div>
+        <button class="icon-btn" type="button" data-close-personal title="Fechar" aria-label="Fechar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
+        </button>
+      </header>
+      <div class="modal-body">
+        <section id="personal-step-auth" class="personal-step">
+          <p class="personal-warning info-banner">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2.5" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>
+            <span>Nome, nascimento, contato e observações clínicas são dados pessoais sensíveis. Confirme a senha de acesso do(a) profissional para visualizá-los ou editá-los.</span>
+          </p>
+          <div class="field">
+            <span>Senha de acesso do(a) Dr(a)</span>
+            <input id="personal-password" type="password" autocomplete="current-password" placeholder="Senha mestra da estação" />
+          </div>
+          <p id="personal-auth-error" class="form-hint is-error" hidden></p>
+          <div class="form-actions">
+            <button type="button" class="btn btn-ghost" data-close-personal>Cancelar</button>
+            <button type="button" class="btn btn-primary" id="personal-unlock">Desbloquear dados</button>
+          </div>
+        </section>
+
+        <section id="personal-step-data" class="personal-step" hidden>
+          <div class="personal-fields">
+            <div class="field">
+              <span>Nome completo</span>
+              <input id="personal-name" type="text" maxlength="120" autocomplete="off" />
+            </div>
+            <div class="field">
+              <span>Data de nascimento</span>
+              <input id="personal-birth" type="date" min="1900-01-01" />
+              <small id="personal-age">Idade: —</small>
+            </div>
+            <div class="field">
+              <span>Contato / Telefone</span>
+              <input id="personal-phone" type="tel" maxlength="40" autocomplete="off" placeholder="(00) 00000-0000" />
+            </div>
+            <div class="field personal-notes-field">
+              <span>Observações clínicas</span>
+              <textarea id="personal-notes" rows="3" maxlength="2000" placeholder="Antecedentes, alergias, medicamentos em uso…"></textarea>
+            </div>
+          </div>
+          <p id="personal-meta" class="form-hint personal-meta"></p>
+          <p id="personal-save-error" class="form-hint is-error" hidden></p>
+          <div class="form-actions">
+            <button type="button" class="btn btn-ghost" id="personal-lock">Ocultar dados</button>
+            <button type="button" class="btn btn-primary" id="personal-save">Salvar alterações</button>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div class="app-shell" hidden>
+    <aside class="sidebar" aria-label="Sessões e escalas clínicas">
+      <section class="panel session-panel">
+        <div class="panel-head">
+          <h2>Sessões do paciente</h2>
+          <div class="panel-tools">
+            <button type="button" class="btn btn-soft btn-sm" id="add-session-btn" title="Adicionar nova sessão de acompanhamento">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+              + Sessão
+            </button>
+          </div>
+        </div>
+        <div id="session-tabs" class="session-tabs" role="tablist" aria-label="Sessões clínicas"></div>
+        <div id="session-list" class="session-list"></div>
+        <p class="panel-foot">T0 é a referência geométrica e fotométrica das demais sessões.</p>
+      </section>
+
+      <section class="panel scales-panel">
+        <div class="panel-head">
+          <h2>Escalas clínicas</h2>
+          <span id="scales-session" class="pill">T0</span>
+        </div>
+        <div id="scales-form" class="scales-form"></div>
+      </section>
+    </aside>
+
+    <main class="workspace" aria-label="Área de trabalho">
+      <div class="workspace-head">
+        <div class="step-context">
+          <span id="workspace-patient" class="workspace-patient" hidden></span>
+          <span class="eyebrow" id="step-kicker">Passo 1 de 4</span>
+          <h2 id="step-title">Upload do par fotográfico</h2>
+          <p id="step-hint">Envie a foto com régua e a foto limpa da sessão selecionada.</p>
+        </div>
+        <div class="topbar-buttons" style="display:flex;gap:8px;align-items:center;">
+          <button id="patients-back" class="btn btn-ghost btn-sm" style="min-width:auto;" title="Voltar ao diretório de pacientes" aria-label="Voltar ao diretório de pacientes">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
+            ← Pacientes
+          </button>
+          <button id="finish-patient" class="btn btn-primary btn-sm" style="min-width:auto;" title="Finalizar e proteger prontuário" aria-label="Finalizar e proteger prontuário">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M8 12l4-4 4,4" /></svg>
+            Finalizar e Proteger
+          </button>
+          <button id="personal-open" class="btn btn-ghost btn-sm" type="button" style="min-width:auto;" title="Ver e editar dados pessoais (senha mestra)" aria-label="Ver e editar dados pessoais do paciente">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></svg>
+            Dados pessoais
+          </button>
+          <button id="patient-export-backup" class="btn btn-ghost btn-sm" type="button" style="min-width:auto;" title="Exportar este caso em arquivo .dmbak cifrado" aria-label="Exportar caso do paciente em backup .dmbak">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="m7 10 5 5 5-5" /><path d="M12 15V3" /></svg>
+            Exportar Caso (.dmbak)
+          </button>
+        </div>
+        <div class="viewport-tools" role="toolbar" aria-label="Ferramentas de visualização">
+          <button id="zoom-out" class="icon-btn" type="button" title="Reduzir zoom" aria-label="Reduzir zoom">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14" /></svg>
+          </button>
+          <span id="zoom-level" class="zoom-level">100%</span>
+          <button id="zoom-in" class="icon-btn" type="button" title="Aumentar zoom" aria-label="Aumentar zoom">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
+          </button>
+          <button id="zoom-fit" class="icon-btn" type="button" title="Ajustar à tela" aria-label="Ajustar à tela">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2" /><path d="M17 3h2a2 2 0 0 1 2 2v2" /><path d="M21 17v2a2 2 0 0 1-2 2h-2" /><path d="M7 21H5a2 2 0 0 1-2-2v-2" /></svg>
+          </button>
+          <span class="toolbar-sep" aria-hidden="true"></span>
+          <button id="loupe-toggle" class="icon-btn is-active" type="button" title="Lupa de precisão 4×" aria-label="Lupa de precisão 4×" aria-pressed="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /><path d="M8 11h6M11 8v6" /></svg>
+          </button>
+        </div>
+      </div>
+
+      <div id="canvas-wrap" class="canvas-wrap">
+        <canvas id="stage" aria-label="Canvas interativo da imagem clínica"></canvas>
+        <div id="empty-state" class="empty-state" hidden></div>
+        <div id="mode-switch" class="mode-switch" hidden></div>
+        <div id="tool-banner" class="tool-banner"></div>
+        <div id="loupe" class="loupe" hidden>
+          <canvas id="loupe-canvas"></canvas>
+          <span class="loupe-tag">4×</span>
+          <span id="loupe-coords" class="loupe-coords">x — · y —</span>
+        </div>
+        <div id="canvas-readout" class="canvas-readout">x — · y —</div>
+        <div id="canvas-tip" class="canvas-tip" hidden>Clique para remover este ponto</div>
+        <div id="landmark-popover" class="landmark-popover" hidden></div>
+      </div>
+    </main>
+
+    <aside class="inspector" aria-label="Inspetor de etapas e resultados">
+      <nav id="steps-nav" class="steps-nav" aria-label="Etapas do fluxo"></nav>
+      <div id="step-panel" class="step-panel"></div>
+      <section class="panel results-panel">
+        <div class="panel-head">
+          <h2>Medições consolidadas</h2>
+          <span id="results-count" class="pill">0</span>
+        </div>
+        <div id="results-table" class="results-table"></div>
+      </section>
+    </aside>
+  </div>
+
+  <div id="compare-modal" class="modal" hidden aria-hidden="true">
+    <div class="modal-backdrop" data-close-compare></div>
+    <div class="modal-window" role="dialog" aria-modal="true" aria-labelledby="compare-title">
+      <header class="modal-head">
+        <div>
+          <span class="eyebrow">Análise longitudinal</span>
+          <h2 id="compare-title">Comparativo Longitudinal &amp; Laudo</h2>
+        </div>
+        <div class="modal-head-actions">
+          <button id="pdf-report" class="btn btn-primary" type="button" title="Gerar laudo clínico completo em PDF">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6" /><path d="M12 18v-6" /><path d="m9 15 3 3 3-3" /></svg>
+            <span>Exportar Laudo PDF</span>
+          </button>
+          <button id="csv-export" class="btn btn-ghost" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="m7 10 5 5 5-5" /><path d="M12 15V3" /></svg>
+            <span>Exportar CSV</span>
+          </button>
+          <button class="icon-btn" type="button" data-close-compare title="Fechar" aria-label="Fechar comparação">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="modal-body">
+        <section class="compare-viewer">
+          <div class="compare-controls">
+            <div id="compare-sessions" class="segmented" aria-label="Sessão de comparação"></div>
+            <div id="compare-mode" class="segmented" aria-label="Modo de imagem">
+              <button type="button" data-mode="natural" class="is-active">Natural</button>
+              <button type="button" data-mode="enhanced">Realce CIELAB</button>
+            </div>
+            <label class="check">
+              <input id="compare-anon" type="checkbox" />
+              <span>Ocultar identificação (GAIS cego)</span>
+            </label>
+            <label class="check pdf-anon">
+              <input id="pdf-include-name" type="checkbox" />
+              <span>Incluir nome completo do(a) paciente no laudo PDF</span>
+            </label>
+          </div>
+
+          <div id="ba-stage" class="ba-stage">
+            <img id="ba-base" alt="Imagem antes" draggable="false" />
+            <img id="ba-top" alt="Imagem depois" draggable="false" />
+            <div id="ba-empty" class="ba-empty" hidden></div>
+            <div id="ba-divider" class="ba-divider" aria-hidden="true">
+              <span class="ba-handle">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18-6-6 6-6" /><path d="m15 6 6 6-6 6" /></svg>
+              </span>
+            </div>
+            <span id="ba-label-left" class="ba-label ba-label-left">T0</span>
+            <span id="ba-label-right" class="ba-label ba-label-right">T2</span>
+          </div>
+          <p class="compare-note">Arraste a cortina vertical ou clique na imagem para revelar antes e depois. As imagens já estão alinhadas ao pixel.</p>
+
+          <div class="gais-blind">
+            <div class="gais-copy">
+              <h3>Avaliação cega — GAIS <button type="button" class="help-badge" data-help="help-glossary-cega" title="Avaliação cega: imagens sem identificação temporal para reduzir o viés de confirmação." aria-label="Ajuda: avaliação cega">?</button></h3>
+              <p>Compare antes e depois sem revelar o momento temporal e registe a melhora percebida.</p>
+            </div>
+            <div id="gais-options" class="gais-options" role="group" aria-label="GAIS"></div>
+          </div>
+        </section>
+
+        <section class="longitudinal">
+          <div class="panel-head">
+            <h2>Evolução longitudinal</h2>
+            <span class="eyebrow">T0 → T4</span>
+          </div>
+          <p class="compare-note">Média de largura, área e contraste por região-alvo. As percentagens comparam com T0 (↓ redução, ↑ aumento).</p>
+          <div id="longitudinal-table" class="longitudinal-table"></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
