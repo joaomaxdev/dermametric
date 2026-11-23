@@ -46,6 +46,9 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Rodar testes (pytest)
+        run: python -m pytest -q
+
       - name: Definir versão
         id: version
         run: |

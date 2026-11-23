@@ -439,10 +439,37 @@ def test_launch_token_is_appended_to_every_image_url():
     thumb = js.split("function thumbHTML", 1)[1].split("</span>`;", 1)[0]
     assert "withLaunchToken(url)" in thumb
     compare = js.split("function updateBA", 1)[1].split("\n}", 1)[0]
-    assert "withLaunchToken(urls.base)" in compare
-    assert "withLaunchToken(urls.top)" in compare
+    assert "assignImageElement(base, urls.base)" in compare
+    assert "assignImageElement(top, urls.top)" in compare
     # URLs de blob/data e domínios externos não recebem query de token.
     helper = js.split("function withLaunchToken", 1)[1].split("\n}", 1)[0]
     assert 'str.startsWith("blob:")' in helper
     assert 'str.startsWith("data:")' in helper
     assert 'str.startsWith("/api/")' in helper
+
+
+def test_images_are_loaded_via_authenticated_fetch():
+    js = _js()
+    fetch_blob = js.split("async function fetchImageBlob", 1)[1].split("\n}", 1)[0]
+    assert "fetch(url" in fetch_blob
+    assert 'headers["X-DermaMetric-Launch"] = DESKTOP_LAUNCH_TOKEN' in fetch_blob or (
+        "imageRequestHeaders()" in fetch_blob
+    )
+    assert "response.status" in fetch_blob
+    assert "console.error" in fetch_blob
+    assert "HTTP ${response.status}" in fetch_blob
+
+    headers = js.split("function imageRequestHeaders", 1)[1].split("\n}", 1)[0]
+    assert 'headers["X-DermaMetric-Launch"] = DESKTOP_LAUNCH_TOKEN' in headers
+    assert "headers.Authorization = `Bearer ${state.auth.token}`" in headers
+
+    load = js.split("function loadImage", 1)[1].split("\n}", 1)[0]
+    assert "URL.createObjectURL(blob)" in load
+    assert "URL.revokeObjectURL(objectUrl)" in load
+    assert "img.src = resolvedUrl" not in load
+
+    # Miniaturas e comparador não montam <img src="/api/files/..."> direto.
+    assert js.count('<img src="${esc(resolvedUrl)}"') == 0
+    assert "hydrateThumbnails(panel)" in js
+    assert "assignImageElement(base, urls.base)" in js
+    assert "assignImageElement(top, urls.top)" in js

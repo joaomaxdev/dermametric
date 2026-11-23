@@ -18,6 +18,8 @@ import os
 import platform
 import re
 import shutil
+import socket
+import ssl
 import stat
 import subprocess
 import sys
@@ -140,6 +142,53 @@ def _select_release_asset(assets: list[dict[str, Any]], info: dict[str, Any]) ->
     return None
 
 
+def _create_ssl_context() -> ssl.SSLContext | None:
+    """Contexto SSL com as CAs do ``certifi`` (necessário no PyInstaller/Win).
+
+    Sem ``certifi`` (execução via código-fonte ou bundle incompleto) cai para
+    o contexto padrão do sistema e, em último caso, para ``None`` (o
+    ``urlopen`` usa então o contexto global do Python).
+    """
+    try:
+        import certifi  # type: ignore[import-not-found]
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:  # noqa: BLE001 - pacote/cafile ausente no bundle
+        try:
+            return ssl.create_default_context()
+        except Exception:  # noqa: BLE001 - plataforma sem suporte a SSL
+            return None
+
+
+def _urlopen(request: urllib.request.Request, timeout: float):
+    """Abre a requisição usando o contexto SSL com CA do ``certifi``."""
+    context = _create_ssl_context()
+    if context is None:
+        return urllib.request.urlopen(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout, context=context)
+
+
+def _network_error_message(exc: BaseException, action: str) -> str:
+    """Traduz a falha real (SSL, DNS, timeout ou HTTP) sem mascarar a causa."""
+    reason = getattr(exc, "reason", None)
+    cause = reason if reason is not None else exc
+    text = str(cause) or cause.__class__.__name__
+
+    if isinstance(cause, ssl.SSLCertVerificationError) or "certificate verify failed" in text.lower():
+        return (
+            f"Falha na verificação do certificado SSL ao {action}: {text}. "
+            "Verifique se o pacote 'certifi' está instalado e empacotado "
+            "(PyInstaller: --collect-data certifi)."
+        )
+    if isinstance(cause, ssl.SSLError):
+        return f"Erro SSL ao {action}: {text}."
+    if isinstance(cause, socket.gaierror):
+        return f"Falha de DNS ao {action}: {text}."
+    if isinstance(cause, (TimeoutError, socket.timeout)):
+        return f"Tempo esgotado ao {action}: {text}."
+    return f"Falha de rede ao {action}: {text}."
+
+
 def _github_get_json(url: str, timeout: float = 10.0) -> Any:
     req = urllib.request.Request(
         url,
@@ -148,7 +197,7 @@ def _github_get_json(url: str, timeout: float = 10.0) -> Any:
             "User-Agent": f"DermaMetric/{APP_VERSION}",
         },
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -160,17 +209,36 @@ def check_for_updates(timeout: float = 10.0) -> dict[str, Any]:
         release = _github_get_json(f"{GITHUB_RELEASES_API}/latest", timeout=timeout)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
-            releases = _github_get_json(f"{GITHUB_RELEASES_API}?per_page=5", timeout=timeout)
+            try:
+                releases = _github_get_json(
+                    f"{GITHUB_RELEASES_API}?per_page=5", timeout=timeout
+                )
+            except urllib.error.HTTPError as list_exc:
+                raise RuntimeError(
+                    f"GitHub recusou a listagem de releases "
+                    f"(HTTP {list_exc.code} {list_exc.reason})."
+                ) from list_exc
+            except (urllib.error.URLError, TimeoutError, ssl.SSLError) as list_exc:
+                raise RuntimeError(
+                    _network_error_message(list_exc, "listar as releases no GitHub")
+                ) from list_exc
             if isinstance(releases, list):
                 release = next(
                     (r for r in releases if not r.get("draft") and not r.get("prerelease")),
                     releases[0] if releases else None,
                 )
         else:
-            raise RuntimeError(f"GitHub respondeu com erro HTTP {exc.code}.") from exc
-    except urllib.error.URLError as exc:
+            reason = f" {exc.reason}" if getattr(exc, "reason", None) else ""
+            raise RuntimeError(
+                f"GitHub respondeu com erro HTTP {exc.code}{reason}."
+            ) from exc
+    except (urllib.error.URLError, TimeoutError, ssl.SSLError) as exc:
         raise RuntimeError(
-            "Sem conexão com a internet para verificar atualizações."
+            _network_error_message(exc, "verificar atualizações")
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(
+            f"Falha de rede ao verificar atualizações: {exc}."
         ) from exc
 
     if not isinstance(release, dict):
@@ -239,21 +307,34 @@ def _download_with_progress(url: str, destination: Path, expected_size: int = 0)
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     downloaded = 0
-    with urllib.request.urlopen(req, timeout=60) as resp, open(destination, "wb") as out:
-        total = int(resp.headers.get("Content-Length") or expected_size or 0)
-        _set_update_state(total_bytes=total, downloaded_bytes=0, progress=1)
-        while True:
-            chunk = resp.read(256 * 1024)
-            if not chunk:
-                break
-            out.write(chunk)
-            downloaded += len(chunk)
-            pct = int(min(92, round((downloaded / total) * 90))) if total > 0 else 50
-            _set_update_state(
-                downloaded_bytes=downloaded,
-                total_bytes=total,
-                progress=max(1, pct),
-            )
+    try:
+        with _urlopen(req, timeout=60) as resp, open(destination, "wb") as out:
+            total = int(resp.headers.get("Content-Length") or expected_size or 0)
+            _set_update_state(total_bytes=total, downloaded_bytes=0, progress=1)
+            while True:
+                chunk = resp.read(256 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                downloaded += len(chunk)
+                pct = int(min(92, round((downloaded / total) * 90))) if total > 0 else 50
+                _set_update_state(
+                    downloaded_bytes=downloaded,
+                    total_bytes=total,
+                    progress=max(1, pct),
+                )
+    except urllib.error.HTTPError as exc:
+        destination.unlink(missing_ok=True)
+        reason = f" {exc.reason}" if getattr(exc, "reason", None) else ""
+        raise RuntimeError(
+            f"Download da atualização recusado pelo servidor "
+            f"(HTTP {exc.code}{reason})."
+        ) from exc
+    except (urllib.error.URLError, TimeoutError, ssl.SSLError, ConnectionError) as exc:
+        destination.unlink(missing_ok=True)
+        raise RuntimeError(
+            _network_error_message(exc, "baixar a atualização")
+        ) from exc
 
 
 def _schedule_exit(delay: float = 0.8) -> None:

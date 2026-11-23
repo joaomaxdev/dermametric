@@ -320,15 +320,35 @@ def clear_access_token() -> None:
         conn.execute("DELETE FROM access_token")
 
 
+def normalize_storage_path(value: str | Path | None) -> str | None:
+    """Normaliza separadores de caminho do Windows (``\\``) para ``/``."""
+    if value is None:
+        return None
+    normalized = str(value).replace("\\", "/").strip()
+    return normalized or None
+
+
 def storage_relative(path: Path | str) -> str:
-    """Retorna o caminho relativo ao storage (para gravar no banco)."""
-    return str(Path(path).resolve().relative_to(STORAGE_DIR))
+    """Retorna o caminho relativo ao storage (sempre com separador ``/``)."""
+    relative = Path(path).resolve().relative_to(Path(STORAGE_DIR).resolve())
+    return normalize_storage_path(relative) or str(relative)
 
 
 def storage_absolute(relative_path: str | None) -> Path | None:
-    if not relative_path:
+    """Resolve um caminho do storage aceitando separadores Windows/Unix."""
+    cleaned = normalize_storage_path(relative_path)
+    if not cleaned:
         return None
-    return (STORAGE_DIR / relative_path).resolve()
+    if len(cleaned) > 1 and cleaned[1] == ":":
+        return None  # drive absoluto do Windows (não pertence ao storage)
+    root = Path(STORAGE_DIR).resolve()
+    raw = Path(cleaned)
+    candidate = raw.resolve() if raw.is_absolute() else (root / cleaned).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate
 
 
 def list_sessions() -> list[dict[str, Any]]:
@@ -365,11 +385,11 @@ def _serialize_session(row: dict[str, Any]) -> dict[str, Any]:
     def _to_url(kind: str, path: str | None) -> str | None:
         if not path:
             return None
-        relative = str(path)
+        relative = normalize_storage_path(path) or ""
         prefix = f"{kind}/"
-        if relative.startswith(prefix):
+        while relative.startswith(prefix):
             relative = relative[len(prefix):]
-        url = f"/api/files/{kind}/{relative}"
+        url = f"/api/files/{kind}/{quote(relative, safe='')}"
         if kind == "processed" and session_id:
             # Imagens processadas são servidas com marca d'água por padrão;
             # o arquivo em disco permanece limpo para o motor de cálculo.

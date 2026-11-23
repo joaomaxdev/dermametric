@@ -8,7 +8,13 @@ criptografados no sucesso.
 
 from __future__ import annotations
 
+import socket
+import ssl
+import sys
+import types
+import urllib.error
 from pathlib import Path
+from urllib.parse import quote
 
 import cv2
 import numpy as np
@@ -264,3 +270,146 @@ def test_delete_unknown_patient_returns_404(station):
         json={"password": PASSWORD},
     )
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# SSL/certifi e diferenciação de erros do autoatualizador
+# ---------------------------------------------------------------------------
+def test_ssl_context_prefers_certifi_cafile(monkeypatch):
+    sentinel = object()
+    calls: list[str | None] = []
+    fake_certifi = types.SimpleNamespace(where=lambda: "/bundle/certifi/cacert.pem")
+    monkeypatch.setitem(sys.modules, "certifi", fake_certifi)
+
+    def fake_create_default_context(*, cafile=None):
+        calls.append(cafile)
+        return sentinel
+
+    monkeypatch.setattr(ssl, "create_default_context", fake_create_default_context)
+
+    assert updater._create_ssl_context() is sentinel
+    assert calls == ["/bundle/certifi/cacert.pem"]
+
+
+def test_ssl_context_falls_back_without_certifi(monkeypatch):
+    sentinel = object()
+    calls: list[str | None] = []
+    # ``None`` em sys.modules faz ``import certifi`` falhar (bundle incompleto).
+    monkeypatch.setitem(sys.modules, "certifi", None)
+
+    def fake_create_default_context(*, cafile=None):
+        calls.append(cafile)
+        return sentinel
+
+    monkeypatch.setattr(ssl, "create_default_context", fake_create_default_context)
+
+    assert updater._create_ssl_context() is sentinel
+    assert calls == [None]
+
+
+def test_check_for_updates_reports_http_status(monkeypatch):
+    def _http(url, timeout=10.0):
+        raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+
+    monkeypatch.setattr(updater, "_github_get_json", _http)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        updater.check_for_updates()
+    message = str(excinfo.value)
+    assert "HTTP 403" in message
+    assert "Forbidden" in message
+    assert "Sem conexão" not in message
+
+
+def test_check_for_updates_reports_ssl_error_without_network_claim(monkeypatch):
+    def _ssl_failure(url, timeout=10.0):
+        raise urllib.error.URLError(
+            ssl.SSLCertVerificationError(1, "certificate verify failed")
+        )
+
+    monkeypatch.setattr(updater, "_github_get_json", _ssl_failure)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        updater.check_for_updates()
+    message = str(excinfo.value)
+    assert "certificado SSL" in message
+    assert "certifi" in message
+    assert "Sem conexão" not in message
+
+
+def test_check_for_updates_reports_dns_and_timeout(monkeypatch):
+    def _dns_failure(url, timeout=10.0):
+        raise urllib.error.URLError(socket.gaierror(-2, "Name or service not known"))
+
+    monkeypatch.setattr(updater, "_github_get_json", _dns_failure)
+    with pytest.raises(RuntimeError, match="DNS"):
+        updater.check_for_updates()
+
+    def _timeout(url, timeout=10.0):
+        raise urllib.error.URLError(TimeoutError("timed out"))
+
+    monkeypatch.setattr(updater, "_github_get_json", _timeout)
+    with pytest.raises(RuntimeError, match="Tempo esgotado"):
+        updater.check_for_updates()
+
+
+def test_download_reports_http_error_and_cleans_partial_file(tmp_path, monkeypatch):
+    def _http(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(updater, "_urlopen", _http)
+    target = tmp_path / "DermaMetric-Setup.exe"
+
+    with pytest.raises(RuntimeError, match="HTTP 404"):
+        updater._download_with_progress("https://example.test/setup.exe", target)
+    assert not target.exists()
+
+
+# ---------------------------------------------------------------------------
+# Caminhos Windows no storage e em /api/files
+# ---------------------------------------------------------------------------
+def test_storage_paths_normalize_windows_separators(station):
+    db.STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    resolved = db.storage_absolute("uploads\\T2_clean_abc.enc")
+    assert resolved == (Path(db.STORAGE_DIR) / "uploads" / "T2_clean_abc.enc").resolve()
+
+    # Traversal e drive absoluto nunca saem da raiz do storage.
+    assert db.storage_absolute("..\\..\\etc\\passwd") is None
+    assert db.storage_absolute("C:\\Windows\\system32\\config") is None
+
+
+def test_serialized_session_urls_use_forward_slashes():
+    session = db._serialize_session(
+        {
+            "id": "T0",
+            "clean_image_path": "uploads\\T0_clean_abc.enc",
+            "ruler_image_path": "uploads\\T0_ruler_abc.enc",
+        }
+    )
+    assert session["clean_image_url"] == "/api/files/uploads/T0_clean_abc.enc"
+    assert session["ruler_image_url"] == "/api/files/uploads/T0_ruler_abc.enc"
+
+
+def test_files_endpoint_accepts_windows_backslash_path(station):
+    client, _ = station
+    patient_id, _, _ = patient_with_images(client)
+    with db.connection() as conn:
+        row = conn.execute(
+            "SELECT clean_image_path FROM sessions "
+            "WHERE patient_id = ? AND clean_image_path IS NOT NULL LIMIT 1",
+            (patient_id,),
+        ).fetchone()
+    assert row is not None and row["clean_image_path"]
+    windows_path = str(row["clean_image_path"]).replace("/", "\\")
+    encoded = quote(windows_path, safe="")
+
+    response = client.get(f"/api/files/uploads/{encoded}")
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("image/")
+
+
+def test_files_endpoint_rejects_traversal_with_backslashes(station):
+    client, _ = station
+    encoded = quote("uploads\\..\\..\\etc\\passwd", safe="")
+    response = client.get(f"/api/files/uploads/{encoded}")
+    assert response.status_code == 400

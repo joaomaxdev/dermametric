@@ -57,6 +57,8 @@ hiddenimports = [
     "cryptography",
     "cryptography.fernet",
     "cryptography.hazmat.primitives.kdf.pbkdf2",
+    # Certificados CA para HTTPS no Windows compilado (GitHub Releases).
+    "certifi",
     # Interface desktop.
     "webview",
 ]

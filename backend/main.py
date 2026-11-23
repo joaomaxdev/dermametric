@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager, contextmanager
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterator
+from urllib.parse import quote
 from uuid import uuid4
 import uuid
 
@@ -545,11 +546,24 @@ def get_encrypted_file(
     O arquivo em disco nunca é alterado.
     """
     directories = {"uploads": db.UPLOAD_DIR, "processed": db.PROCESSED_DIR}
-    directory = directories.get(kind)
+    normalized_kind = str(kind or "").replace("\\", "/").strip().strip("/")
+    directory = directories.get(normalized_kind)
     if directory is None:
         raise HTTPException(status_code=404, detail="Tipo de arquivo inválido")
-    if filename != Path(filename).name or filename.startswith("."):
+
+    # Caminhos gravados no Windows podem chegar como ``uploads\arquivo.enc``.
+    raw_name = str(filename or "").replace("\\", "/").strip()
+    prefix = f"{normalized_kind}/"
+    while raw_name.startswith(prefix):
+        raw_name = raw_name[len(prefix):]
+    if (
+        not raw_name
+        or "/" in raw_name
+        or raw_name.startswith(".")
+        or raw_name != Path(raw_name).name
+    ):
         raise HTTPException(status_code=400, detail="Nome de arquivo inválido")
+    filename = raw_name
 
     candidates = (directory / filename, directory / f"{filename}.enc")
     path = next((candidate for candidate in candidates if candidate.exists()), None)
@@ -568,7 +582,7 @@ def get_encrypted_file(
         or mimetypes.guess_type(logical_name)[0]
         or "application/octet-stream"
     )
-    if watermark and kind == "processed":
+    if watermark and normalized_kind == "processed":
         data = _watermarked_display_bytes(data, session, logical_name)
         media_type = "image/png"
     return Response(
@@ -706,9 +720,11 @@ async def upload_images(
     def _file_url(kind: str, relative: str | None) -> str | None:
         if not relative:
             return None
+        name = db.normalize_storage_path(relative) or ""
         prefix = f"{kind}/"
-        name = relative[len(prefix):] if relative.startswith(prefix) else relative
-        return f"/api/files/{kind}/{name}"
+        while name.startswith(prefix):
+            name = name[len(prefix):]
+        return f"/api/files/{kind}/{quote(name, safe='')}"
 
     if "clean_image_path" in updates:
         clean_image_url = _file_url("uploads", updates["clean_image_path"])

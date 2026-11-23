@@ -120,6 +120,9 @@ const state = {
 
 const view = { zoom: 1, ox: 0, oy: 0, autoFit: true };
 const imageCache = new Map();
+const imageObjectUrls = new Map();
+const uploadPreviewUrls = new Map();
+const IMAGE_CACHE_LIMIT = 24;
 let currentImage = null;
 let currentImageUrl = null;
 let renderToken = 0;
@@ -2479,17 +2482,126 @@ function expectedLandmarkLabel(index) {
    -------------------------------------------------------------------------- */
 function loadImage(url) {
   const resolvedUrl = withLaunchToken(url);
+  if (!resolvedUrl) {
+    return Promise.reject(new Error("Imagem sem URL."));
+  }
   if (imageCache.has(resolvedUrl)) return imageCache.get(resolvedUrl);
-  const promise = new Promise((resolve, reject) => {
-    const img = new Image();
-    img.decoding = "async";
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error("Não foi possível carregar a imagem."));
-    img.src = resolvedUrl;
-  });
+
+  const promise = (async () => {
+    let objectUrl = null;
+    let source = resolvedUrl;
+    if (!isObjectPreviewUrl(resolvedUrl)) {
+      const blob = await fetchImageBlob(resolvedUrl);
+      objectUrl = URL.createObjectURL(blob);
+      source = objectUrl;
+    }
+    try {
+      const img = await new Promise((resolve, reject) => {
+        const image = new Image();
+        image.decoding = "async";
+        image.onload = () => resolve(image);
+        image.onerror = () => reject(new Error("Não foi possível carregar a imagem."));
+        image.src = source;
+      });
+      if (objectUrl) imageObjectUrls.set(resolvedUrl, objectUrl);
+      return img;
+    } catch (error) {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      throw error;
+    }
+  })();
+
   imageCache.set(resolvedUrl, promise);
-  promise.catch(() => imageCache.delete(resolvedUrl));
+  promise.catch(() => {
+    imageCache.delete(resolvedUrl);
+    revokeImageObjectUrl(resolvedUrl);
+  });
+  if (imageCache.size > IMAGE_CACHE_LIMIT) {
+    const oldest = imageCache.keys().next().value;
+    if (oldest && oldest !== resolvedUrl) {
+      imageCache.delete(oldest);
+      revokeImageObjectUrl(oldest);
+    }
+  }
   return promise;
+}
+
+function revokeImageObjectUrl(key) {
+  const objectUrl = imageObjectUrls.get(key);
+  if (!objectUrl) return;
+  URL.revokeObjectURL(objectUrl);
+  imageObjectUrls.delete(key);
+}
+
+function isObjectPreviewUrl(url) {
+  const value = String(url || "");
+  return value.startsWith("blob:") || value.startsWith("data:");
+}
+
+function imageRequestHeaders() {
+  const headers = {};
+  if (DESKTOP_LAUNCH_TOKEN) headers["X-DermaMetric-Launch"] = DESKTOP_LAUNCH_TOKEN;
+  if (state.auth?.token) headers.Authorization = `Bearer ${state.auth.token}`;
+  return headers;
+}
+
+async function fetchImageBlob(url) {
+  const response = await fetch(url, {
+    headers: imageRequestHeaders(),
+    credentials: "same-origin",
+  });
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        const payload = await response.json();
+        if (payload?.detail) detail = String(payload.detail);
+      } else {
+        detail = (await response.text()).slice(0, 200).trim();
+      }
+    } catch {
+      // Corpo de erro ilegível: mantém apenas o código HTTP.
+    }
+    console.error(
+      `Falha ao carregar imagem ${url} (HTTP ${response.status})`,
+      detail,
+    );
+    const suffix = detail ? `: ${detail}` : ".";
+    throw new Error(`Não foi possível carregar a imagem (HTTP ${response.status})${suffix}`);
+  }
+  return response.blob();
+}
+
+function assignImageElement(element, url) {
+  if (!element) return;
+  const resolvedUrl = url ? withLaunchToken(url) : "";
+  if (!resolvedUrl) {
+    element.removeAttribute("src");
+    delete element.dataset.imageSource;
+    return;
+  }
+  if (element.dataset.imageSource === resolvedUrl && element.getAttribute("src")) return;
+  element.dataset.imageSource = resolvedUrl;
+  loadImage(resolvedUrl)
+    .then((img) => {
+      if (element.dataset.imageSource !== resolvedUrl) return;
+      element.src = img.src;
+    })
+    .catch((error) => {
+      if (element.dataset.imageSource !== resolvedUrl) return;
+      element.removeAttribute("src");
+      console.error("Falha ao carregar imagem autenticada", resolvedUrl, error);
+    });
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("beforeunload", () => {
+    imageObjectUrls.forEach((objectUrl) => URL.revokeObjectURL(objectUrl));
+    imageObjectUrls.clear();
+    uploadPreviewUrls.forEach((objectUrl) => URL.revokeObjectURL(objectUrl));
+    uploadPreviewUrls.clear();
+  });
 }
 
 function getDisplayImage() {
@@ -2910,7 +3022,7 @@ async function renderCanvas() {
     img = await loadImage(target.url);
   } catch (error) {
     if (token !== renderToken) return;
-    showEmptyState(`Não foi possível carregar a imagem. ${error.message}`);
+    showEmptyState(error.message);
     return;
   }
   if (token !== renderToken) return;
@@ -3741,6 +3853,7 @@ function renderStepPanel() {
   else if (state.step === 3) panel.innerHTML = step3HTML(session);
   else panel.innerHTML = step4HTML(session);
 
+  hydrateThumbnails(panel);
   bindStepPanel();
 }
 
@@ -3749,11 +3862,36 @@ function renderStepPanel() {
    -------------------------------------------------------------------------- */
 function thumbHTML(url, kind, title) {
   const resolvedUrl = url ? withLaunchToken(url) : "";
-  const src = resolvedUrl ? `<img src="${esc(resolvedUrl)}" alt="${esc(title)}" loading="lazy" />` : `
+  const safeTitle = esc(title || "");
+  const inner = resolvedUrl
+    ? '<span class="thumb-loading" aria-hidden="true">Carregando…</span>'
+    : `
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M21 15v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3" /><path d="m17 8-5-5-5 5" /><path d="M12 3v12" />
     </svg>`;
-  return `<span class="upload-thumb" data-thumb="${kind}">${src}</span>`;
+  return `<span class="upload-thumb" data-thumb="${kind}" data-thumb-src="${esc(resolvedUrl)}" data-thumb-title="${safeTitle}">${inner}</span>`;
+}
+
+function hydrateThumbnails(root = document) {
+  root.querySelectorAll(".upload-thumb[data-thumb-src]").forEach((holder) => {
+    const src = holder.dataset.thumbSrc || "";
+    if (!src || holder.dataset.thumbLoaded === src) return;
+    holder.dataset.thumbLoaded = src;
+    loadImage(src)
+      .then((img) => {
+        if (holder.dataset.thumbSrc !== src) return;
+        const preview = document.createElement("img");
+        preview.src = img.src;
+        preview.alt = holder.dataset.thumbTitle || "";
+        preview.loading = "lazy";
+        holder.replaceChildren(preview);
+      })
+      .catch((error) => {
+        if (holder.dataset.thumbSrc !== src) return;
+        console.error("Falha ao carregar miniatura autenticada", src, error);
+        holder.innerHTML = `<span class="thumb-error">${esc(error.message)}</span>`;
+      });
+  });
 }
 
 function step1HTML(session) {
@@ -3810,8 +3948,13 @@ function setUploadFile(kind, file) {
   state.files[kind] = file;
   const thumb = document.querySelector(`[data-thumb="${kind}"]`);
   if (thumb) {
+    const previous = uploadPreviewUrls.get(kind);
+    if (previous) URL.revokeObjectURL(previous);
     const url = URL.createObjectURL(file);
-    thumb.innerHTML = `<img src="${url}" alt="Prévia ${kind}" />`;
+    uploadPreviewUrls.set(kind, url);
+    thumb.dataset.thumbSrc = "";
+    thumb.dataset.thumbLoaded = "";
+    thumb.innerHTML = `<img src="${esc(url)}" alt="Prévia ${esc(kind)}" />`;
   }
   const name = document.querySelector(`[data-file-name="${kind}"]`);
   if (name) name.textContent = `${file.name} · ${bytesLabel(file.size)}`;
@@ -4636,10 +4779,8 @@ function updateBA() {
   }
 
   divider.style.opacity = "1";
-  const baseSrc = withLaunchToken(urls.base);
-  const topSrc = withLaunchToken(urls.top);
-  if (base.getAttribute("src") !== baseSrc) base.src = baseSrc;
-  if (top.getAttribute("src") !== topSrc) top.src = topSrc;
+  assignImageElement(base, urls.base);
+  assignImageElement(top, urls.top);
 
   const anon = state.compare.anon;
   const t0 = baselineSession();

@@ -32,6 +32,10 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller pywebview
 
+      - name: Rodar testes (pytest)
+        shell: pwsh
+        run: python -m pytest -q
+
       - name: Definir versão
         id: version
         shell: pwsh
