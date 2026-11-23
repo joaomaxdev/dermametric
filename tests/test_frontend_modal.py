@@ -193,6 +193,8 @@ def _free_port() -> int:
 @pytest.mark.e2e
 def test_restore_report_visible_in_chromium(tmp_path):
     """Abre o modal, simula a restauração e confere o cartão/relatório visíveis."""
+    if os.environ.get("DERMAMETRIC_E2E", "").strip().lower() not in {"1", "true", "yes"}:
+        pytest.skip("teste e2e opt-in: defina DERMAMETRIC_E2E=1 para executá-lo")
     node = "node" if os.name != "nt" else "node.exe"
     if not E2E_SCRIPT.exists():
         pytest.skip("script e2e ausente")

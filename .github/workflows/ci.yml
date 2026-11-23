@@ -61,7 +61,10 @@ jobs:
                       if node is None:
                           continue
                       lines = (node.get("message") or "").strip().splitlines()
+                      trace = (node.text or "").strip().splitlines()
                       detail = lines[0][:180] if lines else kind
+                      if trace:
+                          detail += " | " + trace[-1][:180]
                       detail = detail.replace("%", "%25").replace("\r", "")
                       title = f"{case.get('classname')}.{case.get('name')}"
                       print(f"::error title={title}::{detail}")

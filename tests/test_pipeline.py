@@ -18,6 +18,7 @@ import shutil
 import sqlite3
 import stat
 import subprocess
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -515,16 +516,31 @@ def upload_session_images(client, session_id: str, with_ruler: bool = True):
 
 
 def pdf_text(pdf_bytes: bytes) -> str:
-    """Extrai o texto do PDF via poppler para validar conteúdo do laudo."""
-    if not shutil.which("pdftotext"):
+    """Extrai o texto do PDF via pdftotext para validar o conteúdo do laudo."""
+    tool = shutil.which("pdftotext")
+    if not tool:
         pytest.skip("pdftotext (poppler-utils) indisponível para validar o laudo.")
-    result = subprocess.run(
-        ["pdftotext", "-", "-"],
-        input=pdf_bytes,
-        capture_output=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+
+    # O runner Windows traz o pdftotext do Xpdf, que não lê PDF de stdin:
+    # grava em arquivo temporário e pede a saída em UTF-8 no stdout.
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp.write(pdf_bytes)
+        pdf_path = Path(tmp.name)
+    try:
+        result = subprocess.run(
+            [tool, "-enc", "UTF-8", str(pdf_path), "-"],
+            capture_output=True,
+            check=False,
+        )
+    finally:
+        pdf_path.unlink(missing_ok=True)
+
+    stderr = result.stderr.decode("utf-8", "replace")
+    if result.returncode != 0:
+        lowered = stderr.lower()
+        if "usage" in lowered or "version" in lowered:
+            pytest.skip(f"pdftotext incompatível neste ambiente: {stderr.strip()[:160]}")
+        raise AssertionError(stderr)
     return result.stdout.decode("utf-8", "replace")
 
 
