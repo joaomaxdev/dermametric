@@ -145,7 +145,7 @@ O **DermaMetric** é um software **open-source** gratuito, desenvolvido de forma
 
 Se o projeto agrega valor à sua clínica, pesquisa ou prática profissional, você pode apoiar o desenvolvimento contínuo via **Pix com chave aleatória (EVP)** — sem expor e-mail ou dados pessoais no código:
 
-- **Chave Pix aleatória (EVP):** `ab5283df-d213-4266-8a02-380b52cf279f` *(gere uma chave aleatória no app do seu banco e substitua este valor antes de publicar)*.
+- **Chave Pix aleatória (EVP):** `ab5283df-d213-4266-8a02-380b52cf279f`
 
 Você também pode apoiar gratuitamente:
 - Deixando uma **Star ⭐** neste repositório;
