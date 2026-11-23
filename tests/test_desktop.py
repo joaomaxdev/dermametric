@@ -142,3 +142,49 @@ def test_server_starts_without_std_streams(monkeypatch):
         launcher._stream_fallback = None
         launcher._missing_streams.clear()
 
+
+
+def test_desktop_launch_token_blocks_external_browser_and_restricts_cors():
+    import urllib.error
+    import urllib.request
+    from http.cookiejar import CookieJar
+    from backend.main import app
+    from desktop_launcher import LocalServer, find_free_port
+
+    token = "tok-secreto-janela-nativa-123"
+    os.environ["DERMAMETRIC_LAUNCH_TOKEN"] = token
+    port = find_free_port("127.0.0.1", 0)
+    server = LocalServer(app, host="127.0.0.1", port=port).start()
+    try:
+        server.wait_until_ready(timeout=20.0)
+
+        # 1. Acesso direto sem token (ex.: navegador aberto manualmente) deve receber 403
+        try:
+            urllib.request.urlopen(f"{server.base_url}/api/auth/status", timeout=5.0)
+            raise AssertionError("Era esperado 403 sem launch_token")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 403
+
+        # 2. CORS não permite origem externa
+        req = urllib.request.Request(
+            f"{server.base_url}/api/health",
+            headers={"Origin": "https://evil.example.com"},
+        )
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            assert resp.status == 200
+            assert resp.headers.get("access-control-allow-origin") is None
+
+        # 3. Janela nativa entra com ?launch_token=..., recebe cookie HttpOnly e navega na API
+        jar = CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        with opener.open(f"{server.base_url}/?launch_token={token}", timeout=5.0) as resp:
+            assert resp.status == 200
+            set_cookie = resp.headers.get("Set-Cookie") or ""
+            assert "dm_desktop_session=" in set_cookie
+            assert "HttpOnly" in set_cookie
+
+        with opener.open(f"{server.base_url}/api/auth/status", timeout=5.0) as resp:
+            assert resp.status == 200
+    finally:
+        os.environ.pop("DERMAMETRIC_LAUNCH_TOKEN", None)
+        server.stop()

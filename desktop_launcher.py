@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import socket
 import sys
 import threading
@@ -293,12 +294,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.smoke_test:
         return run_smoke_test(data_dir, args.host, port, args.timeout)
 
+    launch_token: str | None = None
+    if not args.no_window and not os.environ.get("DERMAMETRIC_LAUNCH_TOKEN"):
+        launch_token = secrets.token_urlsafe(32)
+        os.environ["DERMAMETRIC_LAUNCH_TOKEN"] = launch_token
+    else:
+        launch_token = os.environ.get("DERMAMETRIC_LAUNCH_TOKEN") or None
+
     server = LocalServer(_load_app(), host=args.host, port=port).start()
     try:
         health = server.wait_until_ready(timeout=args.timeout)
+        entry_url = (
+            f"{server.base_url}/?launch_token={launch_token}"
+            if launch_token
+            else server.base_url
+        )
         if not args.no_window:
-            if not open_desktop_window(server.base_url):
-                webbrowser.open(server.base_url)
+            if not open_desktop_window(entry_url):
+                webbrowser.open(entry_url)
                 # Sem janela nativa, mantém o serviço vivo até o processo encerrar.
                 try:
                     while server._thread is not None and server._thread.is_alive():

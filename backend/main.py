@@ -9,8 +9,10 @@ Documentação interativa em ``/docs``.
 
 from __future__ import annotations
 
+import hmac
 import io
 import json
+import os
 import mimetypes
 import secrets
 from contextlib import asynccontextmanager, contextmanager
@@ -192,13 +194,55 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+LAUNCH_TOKEN_COOKIE = "dm_desktop_session"
+_LOCAL_ORIGIN_REGEX = r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$"
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
+    allow_origin_regex=_LOCAL_ORIGIN_REGEX,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def desktop_launch_guard(request: Request, call_next):
+    expected_token = (os.environ.get("DERMAMETRIC_LAUNCH_TOKEN") or "").strip()
+    if not expected_token:
+        return await call_next(request)
+
+    path = request.url.path
+    if path == "/api/health":
+        return await call_next(request)
+
+    query_token = (request.query_params.get("launch_token") or "").strip()
+    cookie_token = (request.cookies.get(LAUNCH_TOKEN_COOKIE) or "").strip()
+    header_token = (request.headers.get("X-DermaMetric-Launch") or "").strip()
+
+    authorized = any(
+        candidate and hmac.compare_digest(candidate, expected_token)
+        for candidate in (query_token, cookie_token, header_token)
+    )
+    if not authorized:
+        return Response(
+            content=json.dumps(
+                {"detail": "Acesso restrito à janela nativa do DermaMetric."}
+            ),
+            status_code=403,
+            media_type="application/json",
+        )
+
+    response = await call_next(request)
+    if query_token and hmac.compare_digest(query_token, expected_token):
+        response.set_cookie(
+            key=LAUNCH_TOKEN_COOKIE,
+            value=expected_token,
+            httponly=True,
+            samesite="strict",
+            path="/",
+        )
+    return response
 
 # Garante diretórios e schema antes de montar os estáticos.
 db.init_db()
