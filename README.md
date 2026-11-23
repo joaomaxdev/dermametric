@@ -1,302 +1,292 @@
-# DermaMetric
+<div align="center">
+  <img src="frontend/favicon.svg" alt="DermaMetric Logo" width="96" height="96" />
 
-Plataforma **local** de fotogrametria clínica e morfometria para acompanhamento
-longitudinal de lesões e regiões cutâneas, aplicável a qualquer paciente,
-região corporal ou protocolo dermatológico/estético.
+  <h1>DermaMetric</h1>
+  <p>
+    <strong>Estação Clínica Local de Fotogrametria, Morfometria Cutânea e Laudos Longitudinais</strong>
+  </p>
 
-Roda como **aplicativo desktop de duplo clique** (Windows/Linux) ou como
-serviço web local. Protocolo com 4 momentos — **T0, T2, T3, T4** — cada um com:
+  <p>
+    <a href="https://github.com/joaomaxdev/dermametric/releases/latest">
+      <img src="https://img.shields.io/github/v/release/joaomaxdev/dermametric?style=for-the-badge&color=123131&labelColor=0c2323&label=Release" alt="Release" />
+    </a>
+    <a href="https://github.com/joaomaxdev/dermametric/actions/workflows/build-windows.yml">
+      <img src="https://img.shields.io/github/actions/workflow/status/joaomaxdev/dermametric/build-windows.yml?style=for-the-badge&color=18c9a8&labelColor=0c2323&label=Windows%20Build" alt="Windows Build" />
+    </a>
+    <img src="https://img.shields.io/badge/Python-3.11%2B-123131?style=for-the-badge&logo=python&logoColor=57f5cc&labelColor=0c2323" alt="Python 3.11+" />
+    <img src="https://img.shields.io/badge/LGPD-Local--First%20%26%20Cifrado-123131?style=for-the-badge&labelColor=0c2323" alt="LGPD Local-First" />
+    <img src="https://img.shields.io/badge/Open%20Source-Colaborativo-18c9a8?style=for-the-badge&labelColor=0c2323" alt="Open Source" />
+  </p>
 
-- **foto com régua milimetrada** (calibração métrica);
-- **foto limpa, sem régua** (alinhamento e medição);
-- **4 regiões-alvo** por sessão (`L1` a `L4`), com descrição clínica editável.
-  Os códigos legados `E1_maior`…`E4_menor` continuam aceitos pela API.
+  <p>
+    <a href="#instalação-rápida-windows">Instalação Windows</a> •
+    <a href="#recursos-clínicos-e-científicos">Recursos Clínicos</a> •
+    <a href="#segurança-lgpd-e-criptografia">Segurança e LGPD</a> •
+    <a href="#desenvolvimento-e-arquitetura">Desenvolvimento</a> •
+    <a href="#apoie-o-projeto">Apoie o Projeto</a>
+  </p>
+</div>
 
 ---
 
-## Guia rápido da clínica
+## Visão Geral
 
-### 1. Instalação (Windows)
+O **DermaMetric** é uma plataforma **100% local (*local-first*)** de fotogrametria clínica e morfometria para acompanhamento objetivo e longitudinal de lesões, estrias e regiões cutâneas — aplicável a qualquer paciente, área anatômica ou protocolo dermatológico e estético.
 
-1. Baixe `DermaMetric-Setup.exe`.
-2. Dê duplo clique e siga o assistente. **Não é necessário administrador** nem
-   instalar Python.
-3. O instalador cria atalhos na **Área de Trabalho** e no **Menu Iniciar**.
+Projetado para consultórios, clínicas e pesquisadores, o sistema combina **rigor metrológico** (calibração espacial por régua milimetrada, registro geométrico por homografia projetiva e análise colorimétrica CIELAB/CIEDE2000) com **privacidade absoluta**: nenhum prontuário, foto ou dado sensível trafega pela internet.
 
-O programa roda 100% no computador da clínica, sem enviar dados para a
-internet. Os dados ficam em:
+Roda como **aplicativo desktop nativo de duplo clique** (Windows/Linux) ou como serviço web local.
+
+---
+
+## Recursos Clínicos e Científicos
+
+- **Protocolo Longitudinal Estruturado (`T0`, `T2`, `T3`, `T4`…):** acompanhamento seriado com par fotográfico por sessão:
+  - **Foto com régua milimetrada:** define a escala física real (`px/mm`, faixa validada de `1,5` a `50 px/mm`);
+  - **Foto limpa (sem régua):** utilizada para registro espacial, análise colorimétrica e segmentação poligonal de até **4 regiões-alvo (`L1` a `L4`)** com descrição clínica editável (mantendo retrocompatibilidade de API com `E1_maior`…`E4_menor`).
+- **Registro Geométrico por Homografia Projetiva:** alinhamento espacial de sessões de seguimento (`Tn`) sobre o baseline (`T0`) a partir de **4 marcos anatômicos fixos** (*landmarks* nomeados), compensando distância, rotação e inclinação da câmera.
+- **Normalização Fotométrica (CIELAB + CLAHE):** padronização de iluminação/exposição entre consultas com base em ROI de pele saudável.
+- **Morfometria Sub-milimétrica e Colorimetria:**
+  - **Área (`mm²`):** contagem de pixels da máscara convertida pela escala calibrada;
+  - **Largura média e máxima (`mm`):** transformada de distância (eixo medial) com correção de quantização de meio pixel por borda;
+  - **Comprimento (`mm`):** esqueleto morfológico (Zhang–Suen) prolongado até as extremidades da lesão;
+  - **Contraste perceptual (`ΔE00`):** diferença colorimétrica CIEDE2000 entre o interior da região medida e um anel adjacente de pele saudável (~`3 mm`).
+- **Escalas Clínicas e Avaliação Cega (*Blinded Assessment*):** registro integrado de **END** (Escala Numérica de Dor, `0–10`), **Satisfação Likert** (`1–5`), **GAIS** (`−1` a `+3`) e comparação lado a lado com ordem aleatória sem identificação temporal para reduzir viés do avaliador.
+- **Laudo Clínico em PDF:** geração automática de relatório profissional com mapas anatômicos, recortes comparativos e tabela evolutiva de `L1`…`L4`.
+- **Workspace Clínico de Alta Produtividade:** canvas interativo com lupa de precisão `4×`, atalhos de zoom, barras laterais retráteis e **Modo Foco no Canvas**.
+
+---
+
+## Guia Rápido da Clínica
+
+### Instalação Rápida (Windows)
+
+1. Acesse a página de [**Releases**](https://github.com/joaomaxdev/dermametric/releases/latest) e baixe o instalador **`DermaMetric-Setup.exe`**.
+2. Dê duplo clique e siga o assistente. **Não exige privilégios de administrador** nem instalação prévia de Python.
+3. O instalador cria automaticamente atalhos na **Área de Trabalho** e no **Menu Iniciar**.
+
+Os dados clínicos permanecem exclusivamente no computador da clínica:
 
 - **Windows:** `%LOCALAPPDATA%\DermaMetric\data`
 - **Linux:** `~/.local/share/dermametric/data`
 
-### 2. Primeiro acesso
+### Primeiro Acesso e Chave de Recuperação (`.dmkey`)
 
-Na primeira execução, defina a **senha mestra** da estação. Em seguida:
+Na primeira execução, defina a **senha mestra** da estação clínica e:
 
-1. Baixe o **arquivo-chave `.dmkey`** exibido na tela.
-2. Guarde-o em local seguro (pendrive ou cofre de senhas), **fora** do
-   computador da clínica.
-3. Anote a senha mestra. Ela e o `.dmkey` são necessários para recuperar o
-   acesso em caso de troca de máquina ou reinstalação.
+1. Baixe o **arquivo-chave `.dmkey`** gerado na tela inicial.
+2. Armazene-o em local seguro (pendrive dedicado ou cofre de senhas), **fora** do computador da clínica.
+3. Guarde a senha mestra em local seguro.
 
-> Sem a senha mestra **e** o `.dmkey`, os dados cifrados não podem ser
-> recuperados. Trate o `.dmkey` como a chave física do cofre.
+> **Importante:** Sem a senha mestra **e** o arquivo `.dmkey`, os prontuários cifrados não podem ser recuperados em caso de troca de computador ou formatação. Trate o `.dmkey` como a chave física do cofre da clínica.
 
-### 3. Backup completo (`.dmbak`)
+### Backup e Restauração (`.dmbak`)
 
-1. Abra o **perfil** (ícone no topo da interface).
-2. Na seção **“Backup e Restauração (.dmbak)”**, informe a senha mestra.
-3. Clique em **Exportar Backup Completo (.dmbak)**.
-4. Salve o arquivo em pendrive, HD externo ou pasta de rede segura.
+- **Backup completo da clínica:** abra o **Perfil** no topo da interface → **Backup e Restauração (`.dmbak`)** → informe a senha mestra → **Exportar Backup Completo (`.dmbak`)**.
+- **Exportar caso individual (encaminhamento):** dentro do prontuário do paciente, clique em **Exportar `.dmbak`** para gerar um pacote cifrado isolado (ex.: `PAC-AB12CD.dmbak`).
+- **Restauração segura:** selecione o arquivo `.dmbak`, clique em **Inspecionar arquivo** para auditar metadados e conflitos e escolha entre **Mesclar** (preserva prontuários locais) ou **Substituir dados clínicos**. Antes de qualquer alteração, o sistema grava um snapshot automático `pre_restore_*.dmbak` em `data/backups/`.
 
-O arquivo `.dmbak` é cifrado (AES + PBKDF2 + HMAC-SHA256) e contém prontuários,
-imagens, medições e escalas clínicas.
+### Recuperação de Acesso
 
-**Exportar um caso isolado:** abra o prontuário do paciente e clique em
-**“Exportar Caso (.dmbak)”**. O arquivo é nomeado com o código do paciente
-(ex.: `PAC-AB12CD.dmbak`), útil para encaminhamento entre profissionais.
+Caso a senha mestra seja esquecida ou a estação seja migrada para outro computador:
 
-### 4. Restauração (`.dmbak`)
-
-1. Perfil → seção de backup → **Selecionar arquivo .dmbak**.
-2. Informe a senha mestra usada na exportação e clique em **Inspecionar
-   arquivo**. Confira data, profissional, quantidade de pacientes e conflitos
-   de código.
-3. Escolha:
-   - **Restaurar em modo Mesclar** — importa o que falta e preserva os dados
-     locais (recomendado para o dia a dia);
-   - **Substituir dados clínicos** — troca todos os prontuários pelos do
-     backup (use com atenção).
-4. Antes de qualquer gravação, o sistema cria automaticamente um snapshot
-   `pre_restore_*.dmbak` em `data/backups/`.
-
-### 5. Recuperação de acesso (`.dmkey`)
-
-Se a senha mestra for esquecida ou o computador for trocado:
-
-1. Na tela de bloqueio, escolha a opção de recuperação por arquivo-chave.
-2. Selecione o `.dmkey` guardado (ou digite o código impresso na ficha).
-3. Defina uma nova senha mestra e baixe/guarde o **novo** `.dmkey`.
-
-O arquivo antigo deixa de funcionar após a troca.
+1. Na tela de bloqueio, clique em **Recuperar acesso com arquivo-chave (`.dmkey`)**.
+2. Selecione o `.dmkey` guardado (ou informe o código impresso na ficha de emergência).
+3. Cadastre uma nova senha mestra e salve o **novo `.dmkey`** (o arquivo anterior é invalidado automaticamente).
 
 ---
 
-## Desenvolvimento
+## Segurança, LGPD e Criptografia
+
+O DermaMetric aplica criptografia em repouso em todas as camadas sensíveis utilizando `cryptography.fernet.Fernet` e envelopes autenticados (`AES` + `PBKDF2` + `HMAC-SHA256`):
+
+- **Banco SQLite protegido:** campos clínicos e pessoais (`label`, *landmarks*, ROI, escalas clínicas e polígonos) são persistidos com o prefixo `enc:v1:` e descriptografados apenas em memória durante a sessão autenticada.
+- **Imagens cifradas em disco:** uploads e imagens processadas são gravados exclusivamente como `*.enc` e servidos sob demanda via `GET /api/files/...`.
+- **Chave mestra protegida:** derivada via `DERMAMETRIC_MASTER_KEY` ou gerada uma única vez em `storage/.secret.key` com permissão restrita (`0600`).
+- **Migração transparente:** bancos legados em texto puro são migrados automaticamente para o formato cifrado na inicialização.
+
+---
+
+## Apoie o Projeto
+
+O **DermaMetric** é um projeto **open-source** desenvolvido de forma independente para democratizar o acesso a ferramentas de fotogrametria clínica de precisão, sem mensalidades e com total soberania sobre os dados dos pacientes.
+
+Se este software ajuda na sua clínica, pesquisa acadêmica ou prática profissional, considere apoiar a manutenção contínua, novas funcionalidades e os builds oficiais:
+
+<div align="center">
+
+| Canal de Apoio | Chave / Identificador |
+| :--- | :--- |
+| **Pix (Brasil — Apoio Direto)** | `marques-joao-e00@jim.com` |
+
+</div>
+
+Você também pode colaborar gratuitamente:
+- Deixando uma **Star ⭐** neste repositório para aumentar a visibilidade do projeto;
+- Reportando bugs, sugerindo melhorias clínicas ou abrindo **Pull Requests**;
+- Compartilhando o DermaMetric com colegas dermatologistas, esteticistas, fisioterapeutas dermatofuncionais e pesquisadores.
+
+---
+
+## Desenvolvimento e Arquitetura
 
 ### Requisitos
 
-- Python 3.11+ (testado em 3.14)
-- Windows 10/11 (build do instalador) ou Linux
+- **Python 3.11+** (testado em Python 3.14)
+- **Windows 10/11** (para geração do instalador `.exe`) ou **Linux**
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-### Execução web (navegador)
+### Execução em Modo Web
 
 ```bash
 .venv/bin/uvicorn backend.main:app --reload --port 8000
 ```
 
-- Interface: <http://127.0.0.1:8000/>
-- Documentação interativa: <http://127.0.0.1:8000/docs>
-- Healthcheck: <http://127.0.0.1:8000/api/health>
+- **Estação clínica:** <http://127.0.0.1:8000/>
+- **Swagger / OpenAPI:** <http://127.0.0.1:8000/docs>
+- **Healthcheck:** <http://127.0.0.1:8000/api/health>
 
-### Execução desktop
+### Execução em Modo Desktop
 
 ```bash
 .venv/bin/python desktop_launcher.py
 ```
 
-O launcher escolhe uma porta livre (`8765` por padrão), sobe o FastAPI em
-thread daemon, espera `/api/health` e abre uma janela nativa com `pywebview`
-(com fallback para o navegador). Ao fechar a janela, o servidor é encerrado.
+O launcher seleciona uma porta livre (`8765` por padrão), inicia o servidor FastAPI em thread *daemon*, aguarda `/api/health` e abre uma janela nativa via `pywebview` (com fallback automático para o navegador). Ao fechar a janela, o processo backend é encerrado de forma limpa.
 
-Para automação/CI, sem abrir janela:
+Para validação automatizada em CI sem abertura de janela:
 
 ```bash
 DERMAMETRIC_DATA_DIR=/tmp/dermametric-test \
   .venv/bin/python desktop_launcher.py --smoke-test
 ```
 
-### Testes
+### Suíte de Testes Automatizados
 
 ```bash
 .venv/bin/pytest -q
 ```
 
-A suíte valida, com imagens sintéticas calibradas (elipse de 40 × 5 mm a
-10 px/mm), erro inferior a 3% em área, largura média, largura máxima,
-comprimento e ΔE00, além de todos os endpoints, persistência no SQLite,
-backup/restauração `.dmbak` e o smoke test do launcher desktop.
+A suíte valida, com imagens sintéticas calibradas (elipse de `40 × 5 mm` a `10 px/mm`), erro inferior a **3%** em área, largura média, largura máxima, comprimento e `ΔE00`, além de todos os endpoints REST, persistência cifrada no SQLite, backup/restauração `.dmbak`, interface modal e *smoke test* do launcher desktop.
 
-### Estrutura
+### Estrutura do Repositório
 
+```text
+dermametric/
+├── backend/
+│   ├── main.py          # API FastAPI, entrega de arquivos cifrados e inicialização
+│   ├── paths.py         # Resolução centralizada de diretórios (dev × PyInstaller)
+│   ├── database.py      # Schema SQLite, migrações e cifragem transparente de campos
+│   ├── security.py      # Criptografia em repouso Fernet (LGPD)
+│   ├── vision.py        # Calibração, homografia, CIELAB/CLAHE, morfometria e CIEDE2000
+│   ├── report.py        # Gerador de laudo clínico em PDF
+│   └── backup.py        # Empacotamento e auditoria do formato cifrado .dmbak
+├── frontend/
+│   ├── favicon.svg      # Identidade visual oficial DermaMetric
+│   ├── index.html       # Estação clínica (4 etapas, escalas, comparador longitudinal)
+│   ├── styles.css       # Design system responsivo e workspace compacto
+│   └── app.js           # Canvas interativo, lupa 4×, medições e exportações
+├── packaging/
+│   ├── dermametric.spec # Configuração PyInstaller (--onedir --windowed)
+│   ├── installer.iss    # Script Inno Setup 6 (DermaMetric-Setup.exe)
+│   └── dermametric.ico  # Ícone Windows multi-resolução (16–256 px)
+├── tests/               # Testes unitários, integração, backup, UI e desktop
+├── desktop_launcher.py  # Ponto de entrada do aplicativo desktop (pywebview)
+└── requirements.txt     # Dependências Python
 ```
-backend/
-  main.py        # API FastAPI, arquivos cifrados e inicialização do SQLite
-  paths.py       # caminhos centralizados (dev x PyInstaller x dados do usuário)
-  database.py    # schema, migrações, cifragem de campos e persistência
-  security.py    # Fernet (LGPD): textos no SQLite e imagens em disco
-  vision.py      # calibração, homografia, CIELAB/CLAHE, morfometria, CIEDE2000
-  report.py      # laudo PDF (mapas, recortes, detalhamento L1..L4)
-  backup.py      # formato proprietário .dmbak (AES/PBKDF2/HMAC)
-desktop_launcher.py  # entrada do aplicativo desktop (pywebview)
-frontend/
-  index.html     # estação clínica (4 etapas, escalas, comparador)
-  styles.css     # design system responsivo e layout clínico
-  app.js         # canvas, medições, comparação e exportações
-packaging/
-  dermametric.spec   # PyInstaller (onedir + windowed)
-  installer.iss      # Inno Setup (Setup.exe sem administrador)
-  dermametric.ico    # ícone multi-resolução
-tests/
-  test_pipeline.py
-  test_backup.py
-  test_desktop.py
-```
+
+### Caminhos de Execução (`backend/paths.py`)
+
+| Contexto | `ASSETS_DIR` | `DATA_DIR` | `STORAGE_DIR` |
+| :--- | :--- | :--- | :--- |
+| **Desenvolvimento** | Raiz do repositório | `./data` | `./storage` |
+| **Empacotado (PyInstaller)** | `sys._MEIPASS` | `%LOCALAPPDATA%\DermaMetric\data` (Win)<br>`~/.local/share/dermametric/data` (Linux) | `<DATA_DIR>/storage` |
+
+Variáveis de ambiente suportadas para ambientes portáteis ou testes: `DERMAMETRIC_DATA_DIR`, `DERMAMETRIC_DB_PATH` e `DERMAMETRIC_STORAGE_DIR`.
 
 ---
 
-## Build do aplicativo (Windows)
+## Build do Instalador Windows
 
-### 1. Ícone
-
-O ícone `packaging/dermametric.ico` (16–256 px) é gerado a partir de
-`frontend/favicon.svg`. Para regenerar em Linux (requer `rsvg-convert` e
-Pillow):
+### 1. Regenerar Ícone (`packaging/dermametric.ico`)
 
 ```bash
 .venv/bin/python - <<'PY'
 import subprocess, tempfile
 from pathlib import Path
 from PIL import Image
+
 svg, out = Path("frontend/favicon.svg"), Path("packaging/dermametric.ico")
 sizes = [16, 32, 48, 64, 128, 256]
 with tempfile.TemporaryDirectory() as tmp:
     imgs = []
-    for s in sizes:
-        png = Path(tmp) / f"{s}.png"
-        subprocess.run(["rsvg-convert", "-w", str(s), "-h", str(s), str(svg), "-o", str(png)], check=True)
+    for sz in sizes:
+        png = Path(tmp) / f"{sz}.png"
+        subprocess.run(["rsvg-convert", "-w", str(sz), "-h", str(sz), str(svg), "-o", str(png)], check=True)
         imgs.append(Image.open(png).convert("RGBA").copy())
-    imgs[-1].save(out, format="ICO", sizes=[(s, s) for s in sizes], append_images=imgs[:-1])
+    imgs[-1].save(out, format="ICO", sizes=[(sz, sz) for sz in sizes], append_images=imgs[:-1])
 PY
 ```
 
-### 2. Executável (PyInstaller)
-
-Em Windows, com as dependências instaladas:
+### 2. Empacotar com PyInstaller
 
 ```powershell
 pip install -r requirements.txt pyinstaller pywebview
 python -m PyInstaller packaging/dermametric.spec --noconfirm --clean
 ```
 
-Resultado: `dist\DermaMetric\DermaMetric.exe` (modo `--onedir --windowed`,
-sem console).
+Saída: `dist\DermaMetric\DermaMetric.exe`.
 
-### 3. Instalador (Inno Setup)
-
-Instale o [Inno Setup 6](https://jrsoftware.org/isinfo.php) e rode:
+### 3. Compilar Instalador com Inno Setup 6
 
 ```powershell
 & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
-  /DMyAppVersion=1.0.0 packaging\installer.iss
+  /DMyAppVersion=1.0.2 packaging\installer.iss
 ```
 
-Resultado: `dist\installer\DermaMetric-Setup.exe`, com atalhos na Área de
-Trabalho e Menu Iniciar e `PrivilegesRequired=lowest` (sem administrador).
+Saída: `dist\installer\DermaMetric-Setup.exe`.
 
-### 4. GitHub Actions
+### 4. CI/CD (GitHub Actions)
 
-O workflow `.github/workflows/build-windows.yml` compila o instalador em
-`windows-latest` e:
-
-- publica `DermaMetric-Setup.exe` como **artifact** em execuções manuais
-  (`workflow_dispatch`);
-- em tags `v*` (ex.: `v1.0.0`), publica também como **release** do GitHub.
+O workflow `.github/workflows/build-windows.yml` automatiza a compilação em `windows-latest`:
+- **Execução manual (`workflow_dispatch`):** publica `DermaMetric-Setup.exe` como *artifact*;
+- **Push de tag `v*` (ex.: `v1.0.2`):** compila o instalador e publica automaticamente na página de **Releases** do GitHub.
 
 ---
 
-## API e fluxo clínico
+## Referência Rápida da API
 
-1. `POST /api/sessions/{session_id}/upload` — envia `ruler_image` e/ou
-   `clean_image` (multipart), `label` e, opcionalmente, `captured_at`. A data
-   é lida do EXIF da foto quando disponível.
-2. `POST /api/sessions/{session_id}/calibrate` — informa dois pontos da régua
-   e a distância real (`known_mm`); grava `px_per_mm` (faixa 1,5–50 px/mm).
-3. `POST /api/sessions/{session_id}/register` — informa os 4 pontos
-   anatômicos nomeados (`[{label, x, y}]`) e a ROI de pele saudável; alinha
-   contra T0, normaliza a exposição em CIELAB e gera a versão realçada.
-4. `POST /api/sessions/{session_id}/measure` — informa `stria_code` (`L1`…`L4`)
-   e o polígono traçado; calcula e grava a morfometria + ΔE00.
-5. `POST /api/sessions/{session_id}/clinical-scales` — grava END (0–10),
-   Likert (1–5), GAIS (−1 a +3) e observações.
-6. `PATCH /api/sessions/{session_id}` — atualiza rótulo, data de captura e
-   descrições das regiões-alvo.
-7. `DELETE /api/sessions/{session_id}/measurements/{stria_code}` — exclui uma
-   medição; `DELETE /api/sessions/{session_id}/measurements` limpa a sessão.
-8. `GET /api/files/{uploads|processed}/{filename}` — entrega imagens
-   descriptografadas sob demanda.
+| Método | Endpoint | Descrição |
+| :--- | :--- | :--- |
+| `POST` | `/api/sessions/{session_id}/upload` | Envia `ruler_image` e/ou `clean_image` (lê data EXIF automaticamente) |
+| `POST` | `/api/sessions/{session_id}/calibrate` | Grava `px_per_mm` a partir de dois pontos da régua e `known_mm` |
+| `POST` | `/api/sessions/{session_id}/register` | Alinha sessão contra `T0` via 4 marcos anatômicos e normaliza CIELAB |
+| `POST` | `/api/sessions/{session_id}/measure` | Calcula morfometria (`mm`, `mm²`) e `ΔE00` para `L1`…`L4` |
+| `POST` | `/api/sessions/{session_id}/clinical-scales` | Registra escalas END (`0–10`), Likert (`1–5`), GAIS (`−1..+3`) e notas |
+| `PATCH` | `/api/sessions/{session_id}` | Atualiza rótulo, data de captura e descrições das regiões-alvo |
+| `DELETE` | `/api/sessions/{session_id}/measurements/{stria_code}` | Remove uma medição específica (ou todas sem `stria_code`) |
+| `GET` | `/api/files/{uploads\|processed}/{filename}` | Entrega imagens descriptografadas sob demanda para a sessão autenticada |
 
-> **Ordem obrigatória**: registre **T0** antes de T2/T3/T4 (T0 é a referência
-> geométrica e fotométrica). Calibre a régua antes de medir.
-
-### Exemplos
+> **Ordem clínica obrigatória:** registre **T0** antes das sessões de seguimento (`T2`, `T3`, `T4`…), pois `T0` estabelece o sistema de coordenadas e a referência fotométrica do caso.
 
 ```bash
-# Calibração: 300 px correspondem a 30 mm
+# Exemplo: calibrar escala (300 px = 30 mm)
 curl -X POST http://127.0.0.1:8000/api/sessions/T0/calibrate \
   -H 'Content-Type: application/json' \
   -d '{"p1":[100,900],"p2":[400,900],"known_mm":30}'
 
-# Medição de uma região-alvo
+# Exemplo: registrar medição poligonal em L1
 curl -X POST http://127.0.0.1:8000/api/sessions/T0/measure \
   -H 'Content-Type: application/json' \
   -d '{"stria_code":"L1","polygon":[[400,480],[600,480],[600,520],[400,520]]}'
-
-# Exclusão individual de uma medição
-curl -X DELETE http://127.0.0.1:8000/api/sessions/T0/measurements/L1
 ```
 
-## Modelo de medição
+---
 
-- **Área**: contagem de pixels da máscara / `px_per_mm²`.
-- **Larguras**: transformada de distância (eixo medial) com correção de
-  quantização de meio pixel por borda.
-- **Comprimento**: comprimento do esqueleto (Zhang–Suen) prolongado até as
-  pontas afiadas da máscara.
-- **Contraste**: CIEDE2000 entre o interior da região e um anel de pele
-  saudável adjacente de ~3 mm.
-
-## Armazenamento, LGPD e criptografia
-
-Todos os dados ficam locais. A plataforma aplica criptografia em repouso com
-`cryptography.fernet.Fernet`:
-
-- campos sensíveis do SQLite (`label`, landmarks, ROI, escalas e polígonos)
-  são gravados com o prefixo `enc:v1:` e descriptografados apenas na resposta
-  da API;
-- imagens enviadas e processadas são gravadas como `*.enc` e servidas
-  exclusivamente por `GET /api/files/...`;
-- a chave mestra vem de `DERMAMETRIC_MASTER_KEY` ou é gerada uma única vez em
-  `storage/.secret.key` com permissão `0600`;
-- bancos antigos em texto puro são migrados automaticamente na inicialização.
-
-### Caminhos (dev x empacotado)
-
-`backend/paths.py` centraliza a resolução:
-
-| Contexto | `ASSETS_DIR` | `DATA_DIR` | `STORAGE_DIR` |
-|---|---|---|---|
-| Desenvolvimento | raiz do repositório | `./data` | `./storage` |
-| PyInstaller | `sys._MEIPASS` | `%LOCALAPPDATA%\DermaMetric\data` (Win) / `~/.local/share/dermametric/data` (Linux) | `<DATA_DIR>/storage` |
-
-Overrides: `DERMAMETRIC_DATA_DIR`, `DERMAMETRIC_DB_PATH` e
-`DERMAMETRIC_STORAGE_DIR` (úteis para testes e instalações portáteis).
-
-O `.gitignore` exclui imagens, banco, chave, snapshots e artefatos de teste; o
-banco guarda apenas caminhos relativos ao diretório de storage, mantendo-o
-portátil.
+<div align="center">
+  <p>Desenvolvido por <a href="https://github.com/joaomaxdev"><strong>joaomaxdev</strong></a></p>
+</div>
