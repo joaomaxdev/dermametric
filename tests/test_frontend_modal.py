@@ -415,3 +415,34 @@ def test_rail_collapse_css_and_persistence_reset():
     screen = js.split("function setScreen", 1)[1].split("\n}", 1)[0]
     assert 'name !== "workspace"' in screen
     assert "exitCanvasFocus()" in screen
+
+
+# ---------------------------------------------------------------------------
+# Launch token da janela nativa (WebView2) propagado às imagens
+# ---------------------------------------------------------------------------
+def test_launch_token_is_captured_and_removed_from_url():
+    js = _js()
+    assert 'sessionStorage.setItem("dm_launch_token"' in js
+    assert 'sessionStorage.getItem("dm_launch_token")' in js
+    assert "history.replaceState" in js
+    assert 'searchParams.delete("launch_token")' in js
+    assert "function withLaunchToken" in js
+    # O header também acompanha fetch/XHR (fallback do cookie no WebView2).
+    assert 'headers["X-DermaMetric-Launch"] = DESKTOP_LAUNCH_TOKEN' in js
+    assert 'xhr.setRequestHeader("X-DermaMetric-Launch", DESKTOP_LAUNCH_TOKEN)' in js
+
+
+def test_launch_token_is_appended_to_every_image_url():
+    js = _js()
+    load = js.split("function loadImage", 1)[1].split("\n}", 1)[0]
+    assert "withLaunchToken(url)" in load
+    thumb = js.split("function thumbHTML", 1)[1].split("</span>`;", 1)[0]
+    assert "withLaunchToken(url)" in thumb
+    compare = js.split("function updateBA", 1)[1].split("\n}", 1)[0]
+    assert "withLaunchToken(urls.base)" in compare
+    assert "withLaunchToken(urls.top)" in compare
+    # URLs de blob/data e domínios externos não recebem query de token.
+    helper = js.split("function withLaunchToken", 1)[1].split("\n}", 1)[0]
+    assert 'str.startsWith("blob:")' in helper
+    assert 'str.startsWith("data:")' in helper
+    assert 'str.startsWith("/api/")' in helper

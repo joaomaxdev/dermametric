@@ -182,9 +182,68 @@ def test_desktop_launch_token_blocks_external_browser_and_restricts_cors():
             set_cookie = resp.headers.get("Set-Cookie") or ""
             assert "dm_desktop_session=" in set_cookie
             assert "HttpOnly" in set_cookie
+            # Lax (não Strict): o WebView2 precisa enviar o cookie em navegações
+            # de topo e no carregamento de imagens/iframes da própria origem.
+            assert "samesite=lax" in set_cookie.lower()
 
         with opener.open(f"{server.base_url}/api/auth/status", timeout=5.0) as resp:
             assert resp.status == 200
     finally:
         os.environ.pop("DERMAMETRIC_LAUNCH_TOKEN", None)
         server.stop()
+
+
+def test_launch_token_accepted_via_header_without_cookie():
+    """WebView2 pode bloquear cookies; o header de launch deve autenticar."""
+    import urllib.error
+    import urllib.request
+    from backend.main import app
+    from desktop_launcher import LocalServer, find_free_port
+
+    token = "tok-header-janela-nativa-456"
+    os.environ["DERMAMETRIC_LAUNCH_TOKEN"] = token
+    port = find_free_port("127.0.0.1", 0)
+    server = LocalServer(app, host="127.0.0.1", port=port).start()
+    try:
+        server.wait_until_ready(timeout=20.0)
+
+        req = urllib.request.Request(
+            f"{server.base_url}/api/auth/status",
+            headers={"X-DermaMetric-Launch": token},
+        )
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            assert resp.status == 200
+
+        bad = urllib.request.Request(
+            f"{server.base_url}/api/auth/status",
+            headers={"X-DermaMetric-Launch": "token-errado"},
+        )
+        try:
+            urllib.request.urlopen(bad, timeout=5.0)
+            raise AssertionError("Header inválido deveria receber 403")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 403
+    finally:
+        os.environ.pop("DERMAMETRIC_LAUNCH_TOKEN", None)
+        server.stop()
+
+
+def test_image_mime_types_are_explicit():
+    """PyInstaller/Windows podem não ter o registro de MIME do sistema."""
+    import mimetypes
+
+    from backend import main
+
+    expected = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".bmp": "image/bmp",
+        ".tif": "image/tiff",
+        ".tiff": "image/tiff",
+    }
+    assert main._IMAGE_MEDIA_TYPES == expected
+    for suffix, media_type in expected.items():
+        # guess_type precisa devolver o MIME correto mesmo sem registro do SO.
+        assert mimetypes.guess_type(f"foto{suffix}")[0] == media_type

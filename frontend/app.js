@@ -135,6 +135,18 @@ const DESKTOP_LAUNCH_TOKEN = (() => {
     const fromQuery = (params.get("launch_token") || "").trim();
     if (fromQuery) {
       sessionStorage.setItem("dm_launch_token", fromQuery);
+      // Remove o token da barra de endereço: ele fica só na sessão do WebView2.
+      try {
+        const url = new URL(window.location.href);
+        url.searchParams.delete("launch_token");
+        window.history.replaceState(
+          window.history.state,
+          "",
+          `${url.pathname}${url.search}${url.hash}`,
+        );
+      } catch {
+        // URL opaca/file:// ou replaceState bloqueado: mantém a navegação.
+      }
       return fromQuery;
     }
     return (sessionStorage.getItem("dm_launch_token") || "").trim();
