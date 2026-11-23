@@ -129,6 +129,30 @@ let pinch = null;
 let wasPinching = false;
 const touchPoints = new Map();
 
+const DESKTOP_LAUNCH_TOKEN = (() => {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const fromQuery = (params.get("launch_token") || "").trim();
+    if (fromQuery) {
+      sessionStorage.setItem("dm_launch_token", fromQuery);
+      return fromQuery;
+    }
+    return (sessionStorage.getItem("dm_launch_token") || "").trim();
+  } catch {
+    return "";
+  }
+})();
+
+function withLaunchToken(url) {
+  if (!url || !DESKTOP_LAUNCH_TOKEN) return url;
+  const str = String(url);
+  if (str.startsWith("blob:") || str.startsWith("data:")) return str;
+  if (!str.startsWith("/api/")) return str;
+  if (str.includes("launch_token=")) return str;
+  const sep = str.includes("?") ? "&" : "?";
+  return `${str}${sep}launch_token=${encodeURIComponent(DESKTOP_LAUNCH_TOKEN)}`;
+}
+
 const $ = (id) => document.getElementById(id);
 
 /* --------------------------------------------------------------------------
@@ -383,6 +407,7 @@ function toast(message, kind = "info", timeout = 4200) {
 
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
+  if (DESKTOP_LAUNCH_TOKEN) headers["X-DermaMetric-Launch"] = DESKTOP_LAUNCH_TOKEN;
   if (state.auth.token) headers.Authorization = `Bearer ${state.auth.token}`;
   const response = await fetch(path, { ...options, headers });
   let payload = null;
@@ -1618,6 +1643,7 @@ function postFormWithProgress(path, form, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", path);
+    if (DESKTOP_LAUNCH_TOKEN) xhr.setRequestHeader("X-DermaMetric-Launch", DESKTOP_LAUNCH_TOKEN);
     if (state.auth.token) xhr.setRequestHeader("Authorization", `Bearer ${state.auth.token}`);
     xhr.upload?.addEventListener("progress", (event) => {
       if (event.lengthComputable) {
@@ -2435,16 +2461,17 @@ function expectedLandmarkLabel(index) {
    Carregamento de imagens e geometria do canvas
    -------------------------------------------------------------------------- */
 function loadImage(url) {
-  if (imageCache.has(url)) return imageCache.get(url);
+  const resolvedUrl = withLaunchToken(url);
+  if (imageCache.has(resolvedUrl)) return imageCache.get(resolvedUrl);
   const promise = new Promise((resolve, reject) => {
     const img = new Image();
     img.decoding = "async";
     img.onload = () => resolve(img);
     img.onerror = () => reject(new Error("Não foi possível carregar a imagem."));
-    img.src = url;
+    img.src = resolvedUrl;
   });
-  imageCache.set(url, promise);
-  promise.catch(() => imageCache.delete(url));
+  imageCache.set(resolvedUrl, promise);
+  promise.catch(() => imageCache.delete(resolvedUrl));
   return promise;
 }
 
@@ -3704,7 +3731,8 @@ function renderStepPanel() {
    Passo 1 — Upload
    -------------------------------------------------------------------------- */
 function thumbHTML(url, kind, title) {
-  const src = url ? `<img src="${esc(url)}" alt="${esc(title)}" loading="lazy" />` : `
+  const resolvedUrl = url ? withLaunchToken(url) : "";
+  const src = resolvedUrl ? `<img src="${esc(resolvedUrl)}" alt="${esc(title)}" loading="lazy" />` : `
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M21 15v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3" /><path d="m17 8-5-5-5 5" /><path d="M12 3v12" />
     </svg>`;
@@ -4584,8 +4612,10 @@ function updateBA() {
   }
 
   divider.style.opacity = "1";
-  if (base.getAttribute("src") !== urls.base) base.src = urls.base;
-  if (top.getAttribute("src") !== urls.top) top.src = urls.top;
+  const baseSrc = withLaunchToken(urls.base);
+  const topSrc = withLaunchToken(urls.top);
+  if (base.getAttribute("src") !== baseSrc) base.src = baseSrc;
+  if (top.getAttribute("src") !== topSrc) top.src = topSrc;
 
   const anon = state.compare.anon;
   const t0 = baselineSession();
@@ -4852,6 +4882,7 @@ function triggerBlobDownload(blob, filename) {
 
 async function requestBackupExport(password, patientId = null, archivePassword = "") {
   const headers = { "Content-Type": "application/json" };
+  if (DESKTOP_LAUNCH_TOKEN) headers["X-DermaMetric-Launch"] = DESKTOP_LAUNCH_TOKEN;
   if (state.auth.token) headers.Authorization = `Bearer ${state.auth.token}`;
   const body = { password };
   if (patientId) body.patient_id = patientId;

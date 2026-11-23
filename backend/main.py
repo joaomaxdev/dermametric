@@ -64,6 +64,17 @@ FRONTEND_DIR = BASE_DIR / "frontend"
 ALLOWED_IMAGE_SUFFIXES = {
     ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff",
 }
+_IMAGE_MEDIA_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
+}
+for _ext, _mime in _IMAGE_MEDIA_TYPES.items():
+    mimetypes.add_type(_mime, _ext)
 MIN_PX_PER_MM = 1.5
 MAX_PX_PER_MM = 50.0
 EXIF_DATETIME_TAGS = (36867, 36868, 306)  # DateTimeOriginal, Digitized, DateTime
@@ -239,7 +250,7 @@ async def desktop_launch_guard(request: Request, call_next):
             key=LAUNCH_TOKEN_COOKIE,
             value=expected_token,
             httponly=True,
-            samesite="strict",
+            samesite="lax",
             path="/",
         )
     return response
@@ -520,7 +531,12 @@ def get_encrypted_file(
         raise HTTPException(status_code=500, detail="Falha ao descriptografar arquivo") from exc
 
     logical_name = filename[:-4] if filename.endswith(".enc") else filename
-    media_type = mimetypes.guess_type(logical_name)[0] or "application/octet-stream"
+    suffix = Path(logical_name).suffix.lower()
+    media_type = (
+        _IMAGE_MEDIA_TYPES.get(suffix)
+        or mimetypes.guess_type(logical_name)[0]
+        or "application/octet-stream"
+    )
     if watermark and kind == "processed":
         data = _watermarked_display_bytes(data, session, logical_name)
         media_type = "image/png"
