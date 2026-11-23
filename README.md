@@ -18,10 +18,17 @@ Funciona como **aplicativo desktop nativo de duplo clique** no Windows e no Linu
 
 ## Demonstração Visual (Dados Sintéticos)
 
-| Estação Clínica e Prontuários | Fotogrametria e Contraste CIELAB | Laudo Clínico em PDF |
-| :---: | :---: | :---: |
-| <img src="docs/screenshots/01-estacao-clinica.png" alt="Estação Clínica DermaMetric" width="280" /> | <img src="docs/screenshots/02-analise-morfometrica.png" alt="Análise Morfométrica e Colorimétrica Sintética" width="280" /> | <img src="docs/screenshots/03-laudo-clinico-pdf.png" alt="Laudo Clínico em PDF" width="280" /> |
-| *Interface local sem dependência de nuvem* | *Visualização ilustrativa com dados sintéticos* | *Relatório estruturado para impressão/arquivo* |
+- **Estação Clínica e Prontuários** *(interface local sem dependência de nuvem)*:
+
+  <img src="docs/screenshots/01-estacao-clinica.png" alt="Estação Clínica DermaMetric" width="820" />
+
+- **Fotogrametria e Contraste CIELAB** *(visualização ilustrativa gerada com dados sintéticos)*:
+
+  <img src="docs/screenshots/02-analise-morfometrica.png" alt="Análise Morfométrica e Colorimétrica Sintética" width="820" />
+
+- **Laudo Clínico em PDF** *(relatório estruturado para impressão ou arquivo)*:
+
+  <img src="docs/screenshots/03-laudo-clinico-pdf.png" alt="Laudo Clínico em PDF" width="820" />
 
 ---
 
