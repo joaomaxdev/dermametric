@@ -108,6 +108,11 @@ const state = {
   landmarkPopover: null,
   compare: { sessionId: "T2", mode: "natural", anon: false, pos: 50 },
   backupSummary: null,
+  profileTab: "profile",
+  patientTab: "manual",
+  caseImport: { file: null, summary: null },
+  rails: { left: false, right: false },
+  canvasFocus: false,
   busy: false,
 };
 
@@ -448,6 +453,108 @@ function setScreen(name) {
   if (profileBtn) profileBtn.hidden = name === "lock";
   if (compareBtn) compareBtn.hidden = name !== "workspace";
   document.body.classList.toggle("has-modal", name === "lock");
+  // O foco no canvas é transitório: nunca fica preso ao sair do prontuário.
+  if (name !== "workspace") exitCanvasFocus();
+}
+
+/* --------------------------------------------------------------------------
+   Barras laterais recolhíveis e foco no canvas
+   -------------------------------------------------------------------------- */
+const RAIL_STORAGE_KEY = "dermametric.rails.v1";
+
+function loadRailPreferences() {
+  try {
+    const raw = window.localStorage?.getItem(RAIL_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    state.rails = {
+      left: Boolean(parsed?.left),
+      right: Boolean(parsed?.right),
+    };
+  } catch {
+    state.rails = { left: false, right: false };
+  }
+}
+
+function saveRailPreferences() {
+  try {
+    window.localStorage?.setItem(RAIL_STORAGE_KEY, JSON.stringify(state.rails));
+  } catch {
+    // localStorage indisponível (modo privado, cota): mantém apenas em memória.
+  }
+}
+
+function isRailCollapsed(side) {
+  return Boolean(state.rails[side] || state.canvasFocus);
+}
+
+function applyRailState() {
+  const shell = document.querySelector(".app-shell");
+  const collapsed = {
+    left: isRailCollapsed("left"),
+    right: isRailCollapsed("right"),
+  };
+  if (shell) {
+    shell.classList.toggle("is-left-collapsed", collapsed.left);
+    shell.classList.toggle("is-right-collapsed", collapsed.right);
+  }
+  ["left", "right"].forEach((side) => {
+    const button = $(`rail-collapse-${side}`);
+    if (!button) return;
+    const area = side === "left" ? "esquerda" : "direita";
+    const label = collapsed[side] ? "Expandir" : "Recolher";
+    button.setAttribute("aria-expanded", String(!collapsed[side]));
+    button.title = `${label} barra lateral ${area}`;
+    button.setAttribute("aria-label", button.title);
+    const text = button.querySelector(".rail-collapse-label");
+    if (text) text.textContent = label;
+  });
+  const focus = $("canvas-focus");
+  if (focus) {
+    focus.classList.toggle("is-active", state.canvasFocus);
+    focus.setAttribute("aria-pressed", String(state.canvasFocus));
+    focus.title = state.canvasFocus
+      ? "Sair do Foco no Canvas e restaurar as barras laterais"
+      : "Foco no Canvas: recolhe as duas barras laterais";
+  }
+}
+
+function setRailCollapsed(side, collapsed) {
+  if (side !== "left" && side !== "right") return;
+  state.rails[side] = Boolean(collapsed);
+  saveRailPreferences();
+  applyRailState();
+}
+
+function toggleRail(side) {
+  if (state.canvasFocus) {
+    // Ao ajustar uma lateral durante o foco, o foco termina respeitando o
+    // estado visual atual e a barra clicada é invertida.
+    state.canvasFocus = false;
+    state.rails = { left: true, right: true };
+    state.rails[side] = false;
+    saveRailPreferences();
+    applyRailState();
+    return;
+  }
+  setRailCollapsed(side, !state.rails[side]);
+}
+
+function toggleCanvasFocus() {
+  state.canvasFocus = !state.canvasFocus;
+  applyRailState();
+}
+
+function exitCanvasFocus() {
+  if (!state.canvasFocus) return;
+  state.canvasFocus = false;
+  applyRailState();
+}
+
+function resetWorkspaceRails() {
+  state.canvasFocus = false;
+  loadRailPreferences();
+  applyRailState();
 }
 
 function showLockView(view) {
@@ -805,7 +912,7 @@ async function refreshRecoveryStatus() {
   const parts = [];
   if (state.recovery.keyId) parts.push(`chave ${state.recovery.keyId}`);
   if (state.recovery.createdAt) parts.push(`criada em ${formatTimestamp(state.recovery.createdAt)}`);
-  meta.textContent = parts.length ? `Ativa: ${parts.join(" · ")}` : "Recuperação configurada";
+  meta.textContent = parts.length ? `Chave ativa: ${parts.join(" · ")}` : "Chave ativa: recuperação configurada";
 }
 
 async function bootAuth() {
@@ -1238,6 +1345,7 @@ function setPatientFilter(filter) {
 async function openProfileModal() {
   const modal = $("profile-modal");
   if (!modal) return;
+  hideRestoreBanner();
   setLockError("profile-error", "");
   setLockError("password-error", "");
   setLockError("recovery-error", "");
@@ -1250,12 +1358,15 @@ async function openProfileModal() {
   });
   const backupFile = $("backup-file");
   if (backupFile) backupFile.value = "";
+  updateBackupFileStatus(null);
   const preview = $("backup-preview");
   if (preview) {
     preview.hidden = true;
     preview.innerHTML = "";
   }
+  resetBackupProgress();
   state.backupSummary = null;
+  switchProfileTab("profile");
   const result = $("recovery-result");
   if (result) result.hidden = true;
   if ($("profile-name")) $("profile-name").value = state.profile.professional_name || "";
@@ -1381,6 +1492,8 @@ function openPatientModal() {
   $("patient-form")?.reset();
   const sessions = $("patient-sessions");
   if (sessions) sessions.value = "5";
+  resetCaseImport();
+  switchPatientTab("manual");
   modal.hidden = false;
   modal.setAttribute("aria-hidden", "false");
   document.body.classList.add("has-modal");
@@ -1392,7 +1505,286 @@ function closePatientModal() {
   if (!modal) return;
   modal.hidden = true;
   modal.setAttribute("aria-hidden", "true");
+  resetCaseImport();
   if (state.screen !== "lock") document.body.classList.remove("has-modal");
+}
+
+/* --------------------------------------------------------------------------
+   Abas do modal Novo Paciente: cadastro manual × importação de caso (.dmbak)
+   -------------------------------------------------------------------------- */
+const PATIENT_TABS = ["manual", "import"];
+
+function switchPatientTab(tabName) {
+  const name = PATIENT_TABS.includes(tabName) ? tabName : "manual";
+  state.patientTab = name;
+  document.querySelectorAll("[data-patient-tab]").forEach((button) => {
+    const active = button.dataset.patientTab === name;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  PATIENT_TABS.forEach((tab) => {
+    const panel = tab === "manual" ? $("patient-form") : $("patient-panel-import");
+    if (panel) panel.hidden = tab !== name;
+  });
+  const body = document.querySelector("#patient-modal .modal-body");
+  if (body) body.scrollTop = 0;
+}
+
+function resetCaseImport() {
+  state.caseImport = { file: null, summary: null };
+  const input = $("case-import-file");
+  if (input) input.value = "";
+  const password = $("case-import-password");
+  if (password) password.value = "";
+  updateCaseImportFileStatus(null);
+  setLockError("case-import-error", "");
+  const preview = $("case-import-preview");
+  if (preview) {
+    preview.hidden = true;
+    preview.innerHTML = "";
+  }
+  const conflict = $("case-import-conflict");
+  if (conflict) conflict.hidden = true;
+  const defaultStrategy = document.querySelector(
+    'input[name="case-import-strategy"][value="new"]',
+  );
+  if (defaultStrategy) defaultStrategy.checked = true;
+  setCaseImportProgress(0, "Preparando importação…");
+  const progress = $("case-import-progress");
+  if (progress) progress.hidden = true;
+  const submit = $("case-import-submit");
+  if (submit) {
+    submit.hidden = true;
+    submit.disabled = false;
+  }
+}
+
+function updateCaseImportFileStatus(file) {
+  const box = $("case-import-drop");
+  const status = $("case-import-file-status");
+  if (box) box.classList.toggle("has-file", Boolean(file));
+  if (!status) return;
+  if (file) {
+    const sizeKb = Math.max(1, Math.round(file.size / 1024));
+    status.textContent = `Arquivo carregado: ${file.name} (${sizeKb} KB)`;
+  } else {
+    status.textContent = "Nenhum arquivo selecionado. Clique acima para escolher ou arraste o .dmbak aqui.";
+  }
+}
+
+function setCaseImportProgress(percent, label) {
+  const value = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
+  const bar = $("case-import-bar");
+  const text = $("case-import-percent");
+  const status = $("case-import-status");
+  if (bar) {
+    bar.style.width = `${value}%`;
+    bar.setAttribute("aria-valuenow", String(value));
+  }
+  if (text) text.textContent = `${value}%`;
+  if (status && label) status.textContent = label;
+}
+
+function caseImportPreviewHtml(summary) {
+  const professional = summary.professional || {};
+  const counts = summary.counts || {};
+  const code = summary.patient_code
+    || (Array.isArray(summary.patient_codes) ? summary.patient_codes[0] : "")
+    || "—";
+  const created = formatTimestamp(summary.created_at) || summary.created_at || "—";
+  const origin = [professional.name, professional.registry]
+    .filter(Boolean)
+    .join(" · ") || "Profissional não identificado";
+  const institution = professional.institution
+    ? `<span class="backup-origin-inst">${esc(professional.institution)}</span>`
+    : "";
+  return `
+    <div class="backup-card-head">
+      <span class="backup-mode">Caso individual</span>
+      <span class="backup-date">${esc(created)}</span>
+    </div>
+    <div class="backup-origin">${esc(origin)}${institution}</div>
+    <div class="backup-stats">
+      <span><b>${esc(String(counts.sessions ?? 0))}</b> sessões</span>
+      <span><b>${esc(String(counts.measurements ?? 0))}</b> medições</span>
+      <span><b>${esc(String(counts.images ?? 0))}</b> imagens</span>
+    </div>
+    <div class="backup-codes"><code>${esc(code)}</code></div>
+  `;
+}
+
+function postFormWithProgress(path, form, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", path);
+    if (state.auth.token) xhr.setRequestHeader("Authorization", `Bearer ${state.auth.token}`);
+    xhr.upload?.addEventListener("progress", (event) => {
+      if (event.lengthComputable) {
+        onProgress?.(Math.round((event.loaded / event.total) * 100));
+      }
+    });
+    xhr.addEventListener("load", () => {
+      let payload = null;
+      try {
+        payload = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+      } catch { payload = null; }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(payload);
+        return;
+      }
+      const detail = payload?.detail;
+      const message = typeof detail === "string"
+        ? detail
+        : Array.isArray(detail)
+          ? detail.map((item) => item?.msg || item?.detail || "").filter(Boolean).join(" · ")
+          : `Falha na requisição (${xhr.status})`;
+      reject(new Error(message));
+    });
+    xhr.addEventListener("error", () => reject(new Error("Falha de rede ao importar o caso.")));
+    xhr.send(form);
+  });
+}
+
+function clearCaseImportPreview() {
+  state.caseImport.summary = null;
+  const preview = $("case-import-preview");
+  if (preview) {
+    preview.hidden = true;
+    preview.innerHTML = "";
+  }
+  const conflict = $("case-import-conflict");
+  if (conflict) conflict.hidden = true;
+  const submit = $("case-import-submit");
+  if (submit) submit.hidden = true;
+  const progress = $("case-import-progress");
+  if (progress) progress.hidden = true;
+  setCaseImportProgress(0, "Preparando importação…");
+}
+
+async function validateCaseImport() {
+  const file = state.caseImport.file || $("case-import-file")?.files?.[0];
+  const password = $("case-import-password")?.value || "";
+  setLockError("case-import-error", "");
+  clearCaseImportPreview();
+  if (!file) {
+    setLockError("case-import-error", "Selecione o arquivo .dmbak do caso a importar.");
+    return;
+  }
+  if (!password) {
+    setLockError("case-import-error", "Informe a senha do arquivo (do caso ou mestra da estação).");
+    return;
+  }
+  const form = new FormData();
+  form.append("file", file);
+  form.append("password", password);
+  setBusy(true, "Validando o caso (.dmbak)…");
+  try {
+    const summary = await api("/api/backup/inspect", { method: "POST", body: form });
+    if (summary.mode !== "patient" && summary.mode !== "selected") {
+      setLockError(
+        "case-import-error",
+        "Este arquivo é um backup completo da estação. Para restaurá-lo, use Perfil → Backup e restauração.",
+      );
+      return;
+    }
+    state.caseImport.summary = summary;
+    const preview = $("case-import-preview");
+    if (preview) {
+      preview.innerHTML = caseImportPreviewHtml(summary);
+      preview.hidden = false;
+    }
+    const conflict = $("case-import-conflict");
+    if (conflict) conflict.hidden = !summary.has_conflicts;
+    if (summary.has_conflicts) {
+      const defaultStrategy = document.querySelector(
+        'input[name="case-import-strategy"][value="new"]',
+      );
+      if (defaultStrategy) defaultStrategy.checked = true;
+    }
+    const submit = $("case-import-submit");
+    if (submit) submit.hidden = false;
+    const code = summary.patient_code || "caso";
+    toast(
+      summary.has_conflicts
+        ? `Caso ${code} válido. O código já existe nesta estação: escolha como importar.`
+        : `Caso ${code} válido e pronto para importar.`,
+      "success",
+      5200,
+    );
+  } catch (error) {
+    setLockError("case-import-error", error.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function submitCaseImport(event) {
+  event?.preventDefault?.();
+  const file = state.caseImport.file || $("case-import-file")?.files?.[0];
+  const password = $("case-import-password")?.value || "";
+  const summary = state.caseImport.summary;
+  setLockError("case-import-error", "");
+  if (!file) {
+    setLockError("case-import-error", "Selecione o arquivo .dmbak do caso a importar.");
+    return;
+  }
+  if (!password) {
+    setLockError("case-import-error", "Informe a senha do arquivo do caso.");
+    return;
+  }
+  if (!summary) {
+    setLockError("case-import-error", "Valide o caso antes de importar.");
+    return;
+  }
+  const strategy = document.querySelector(
+    'input[name="case-import-strategy"]:checked',
+  )?.value || "new";
+  const importAsNew = Boolean(summary.has_conflicts && strategy === "new");
+
+  const form = new FormData();
+  form.append("file", file);
+  form.append("password", password);
+  form.append("mode", "merge");
+  form.append("import_as_new", importAsNew ? "true" : "false");
+
+  const submit = $("case-import-submit");
+  const progress = $("case-import-progress");
+  if (progress) progress.hidden = false;
+  if (submit) submit.disabled = true;
+  setCaseImportProgress(5, "Enviando o arquivo do caso…");
+  setBusy(true, "Importando caso (.dmbak)…");
+  try {
+    const result = await postFormWithProgress("/api/backup/restore", form, (percent) => {
+      setCaseImportProgress(
+        Math.min(70, 5 + Math.round(percent * 0.65)),
+        `Enviando o arquivo do caso… ${percent}%`,
+      );
+    });
+    setCaseImportProgress(85, "Gravando prontuário, sessões e imagens…");
+    await loadPatients();
+    setCaseImportProgress(100, "Prontuário disponível no diretório");
+    const imported = Array.isArray(result?.imported_patients) ? result.imported_patients : [];
+    const target = imported.find((item) => item.status === "created_copy")
+      || imported.find((item) => item.status === "created")
+      || imported[0]
+      || null;
+    const code = target?.patient_code || summary.patient_code || "";
+    const copyLabel = target?.status === "created_copy"
+      ? ` como novo prontuário${code ? ` ${code}` : ""}`
+      : "";
+    closePatientModal();
+    toast(`Caso importado${copyLabel}.`, "success", 5200);
+    if (target?.id) {
+      await openPatient(target.id);
+    }
+  } catch (error) {
+    setLockError("case-import-error", error.message);
+    setCaseImportProgress(0, "Importação interrompida");
+    if (submit) submit.disabled = false;
+  } finally {
+    setBusy(false);
+  }
 }
 
 async function submitPatient(event) {
@@ -1818,6 +2210,7 @@ function applyPatientPayload(payload) {
 }
 
 async function openPatient(patientId, preloaded) {
+  resetWorkspaceRails();
   setBusy(true, "Abrindo prontuário…");
   try {
     const data = preloaded || await api(`/api/patients/${encodeURIComponent(patientId)}`, {
@@ -4457,13 +4850,17 @@ function triggerBlobDownload(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 6000);
 }
 
-async function requestBackupExport(password, patientId = null) {
+async function requestBackupExport(password, patientId = null, archivePassword = "") {
   const headers = { "Content-Type": "application/json" };
   if (state.auth.token) headers.Authorization = `Bearer ${state.auth.token}`;
+  const body = { password };
+  if (patientId) body.patient_id = patientId;
+  const dedicated = String(archivePassword || "").trim();
+  if (patientId && dedicated) body.archive_password = dedicated;
   const response = await fetch("/api/backup/export", {
     method: "POST",
     headers,
-    body: JSON.stringify({ password, patient_id: patientId }),
+    body: JSON.stringify(body),
   });
   if (!response.ok) {
     let detail = `Falha ao exportar o backup (${response.status})`;
@@ -4475,11 +4872,33 @@ async function requestBackupExport(password, patientId = null) {
   }
   const blob = await response.blob();
   const fallback = patientId
-    ? `${state.patient?.code || "DermaMetric-Paciente"}.dmbak`
-    : `DermaMetric-Backup-${new Date().toISOString().slice(0, 10)}.dmbak`;
+    ? `DermaMetric-Caso-${state.patient?.code || "Paciente"}-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.dmbak`
+    : `DermaMetric-Backup-Completo-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "").slice(0, 13)}.dmbak`;
   const filename = backupResponseFilename(response, fallback);
   triggerBlobDownload(blob, filename);
   return filename;
+}
+
+/* --------------------------------------------------------------------------
+   Abas do modal de perfil (Dados · Segurança · Backup)
+   -------------------------------------------------------------------------- */
+const PROFILE_TABS = ["profile", "security", "backup"];
+
+function switchProfileTab(tabName) {
+  const name = PROFILE_TABS.includes(tabName) ? tabName : "profile";
+  state.profileTab = name;
+  document.querySelectorAll("[data-profile-tab]").forEach((button) => {
+    const active = button.dataset.profileTab === name;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  PROFILE_TABS.forEach((tab) => {
+    const panel = $(`profile-panel-${tab}`);
+    if (panel) panel.hidden = tab !== name;
+  });
+  const body = document.querySelector("#profile-modal .modal-body");
+  if (body) body.scrollTop = 0;
 }
 
 async function exportFullBackup() {
@@ -4501,27 +4920,117 @@ async function exportFullBackup() {
   }
 }
 
-async function exportPatientCaseBackup() {
+function resetExportCaseExtras() {
+  const checkbox = $("export-case-custom-password");
+  if (checkbox) checkbox.checked = false;
+  const field = $("export-case-file-password-field");
+  if (field) field.hidden = true;
+  const password = $("export-case-file-password");
+  if (password) {
+    password.value = "";
+    password.type = "password";
+  }
+  const toggle = $("export-case-file-password-toggle");
+  if (toggle) {
+    toggle.setAttribute("aria-pressed", "false");
+    toggle.setAttribute("aria-label", "Mostrar senha");
+    toggle.title = "Mostrar senha";
+  }
+}
+
+function syncExportCasePasswordField() {
+  const checkbox = $("export-case-custom-password");
+  const field = $("export-case-file-password-field");
+  const enabled = Boolean(checkbox?.checked);
+  if (field) field.hidden = !enabled;
+  if (enabled) setTimeout(() => $("export-case-file-password")?.focus(), 30);
+}
+
+function toggleExportCasePasswordVisibility() {
+  const input = $("export-case-file-password");
+  const toggle = $("export-case-file-password-toggle");
+  if (!input) return;
+  const show = input.type === "password";
+  input.type = show ? "text" : "password";
+  if (toggle) {
+    toggle.setAttribute("aria-pressed", String(show));
+    toggle.setAttribute("aria-label", show ? "Ocultar senha" : "Mostrar senha");
+    toggle.title = show ? "Ocultar senha" : "Mostrar senha";
+  }
+}
+
+function closeExportCaseModal() {
+  const modal = $("export-case-modal");
+  if (!modal) return;
+  modal.hidden = true;
+  modal.setAttribute("aria-hidden", "true");
+  const input = $("export-case-password");
+  if (input) input.value = "";
+  resetExportCaseExtras();
+  setLockError("export-case-error", "");
+  if (state.screen !== "lock") document.body.classList.remove("has-modal");
+}
+
+function exportPatientCaseBackup() {
   const patient = state.patient;
   if (!patient) {
     toast("Abra um prontuário antes de exportar o caso.", "error");
     return;
   }
-  const password = window.prompt(
-    `Senha mestra para cifrar o caso ${patient.code || ""}:`,
-    "",
-  );
-  if (password === null) return;
-  if (!password) {
-    toast("Informe a senha mestra para exportar o caso.", "error");
+  const modal = $("export-case-modal");
+  if (!modal) return;
+  setLockError("export-case-error", "");
+  const input = $("export-case-password");
+  if (input) input.value = "";
+  resetExportCaseExtras();
+  const title = $("export-case-title");
+  if (title) title.textContent = `Exportar Caso ${patient.code || ""} (.dmbak)`;
+  const desc = $("export-case-desc");
+  if (desc) {
+    desc.textContent = `Informe a senha mestra da estação para cifrar o prontuário ${patient.code || ""} com todas as sessões e imagens.`;
+  }
+  modal.hidden = false;
+  modal.removeAttribute("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("has-modal");
+  setTimeout(() => input?.focus(), 40);
+}
+
+async function submitExportCaseBackup(event) {
+  event?.preventDefault?.();
+  const patient = state.patient;
+  if (!patient) {
+    closeExportCaseModal();
     return;
+  }
+  const password = $("export-case-password")?.value || "";
+  const useCustom = Boolean($("export-case-custom-password")?.checked);
+  const archivePassword = useCustom ? ($("export-case-file-password")?.value || "") : "";
+  setLockError("export-case-error", "");
+  if (!password) {
+    setLockError("export-case-error", "Informe a senha mestra para exportar o caso.");
+    return;
+  }
+  if (useCustom) {
+    if (!archivePassword) {
+      setLockError("export-case-error", "Defina a senha específica do arquivo do caso.");
+      return;
+    }
+    if (archivePassword.length < 6) {
+      setLockError("export-case-error", "A senha do arquivo deve ter ao menos 6 caracteres.");
+      return;
+    }
   }
   setBusy(true, "Gerando backup do caso (.dmbak)…");
   try {
-    const filename = await requestBackupExport(password, patient.id);
-    toast(`Caso ${patient.code || ""} exportado: ${filename}`, "success", 5200);
+    const filename = await requestBackupExport(password, patient.id, archivePassword);
+    closeExportCaseModal();
+    const note = archivePassword
+      ? " Protegido pela senha específica do arquivo."
+      : "";
+    toast(`Caso ${patient.code || ""} exportado: ${filename}.${note}`.trim(), "success", 5200);
   } catch (error) {
-    toast(error.message, "error", 6000);
+    setLockError("export-case-error", error.message);
   } finally {
     setBusy(false);
   }
@@ -4532,7 +5041,11 @@ function backupPreviewHtml(summary) {
   const counts = summary.counts || {};
   const codes = Array.isArray(summary.patient_codes) ? summary.patient_codes : [];
   const conflicts = Array.isArray(summary.conflicts) ? summary.conflicts : [];
-  const modeLabel = summary.mode === "patient" ? "Caso individual" : "Completo";
+  const modeLabel = summary.mode === "selected"
+    ? `Seleção de análises (${summary.selected_count ?? codes.length})`
+    : summary.mode === "patient"
+      ? "Caso individual"
+      : "Completo";
   const created = formatTimestamp(summary.created_at) || summary.created_at || "—";
   const origin = [professional.name, professional.registry]
     .filter(Boolean)
@@ -4563,8 +5076,204 @@ function backupPreviewHtml(summary) {
   `;
 }
 
+const BACKUP_STEPS = [
+  { percent: 10, label: "1/5 Lendo cabeçalho DMBAK..." },
+  { percent: 30, label: "2/5 Validando senha e integridade HMAC..." },
+  { percent: 50, label: "3/5 Criando snapshot de segurança..." },
+  { percent: 75, label: "4/5 Recifrando imagens e gravando registros..." },
+  { percent: 90, label: "5/5 Sincronizando prontuários na tela..." },
+];
+
+function setBackupProgress(percent, label) {
+  const value = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
+  const bar = $("backup-progress-bar");
+  const percentNode = $("backup-progress-percent");
+  const stepNode = $("backup-progress-step");
+  if (bar) {
+    bar.style.width = `${value}%`;
+    bar.setAttribute("aria-valuenow", String(value));
+  }
+  if (percentNode) percentNode.textContent = `${value}%`;
+  if (stepNode && label) stepNode.textContent = label;
+}
+
+function backupLogLine(message, level = "info") {
+  const log = $("backup-log");
+  if (!log) return;
+  const time = new Date().toLocaleTimeString("pt-BR", { hour12: false });
+  const line = document.createElement("div");
+  line.className = `backup-log-line is-${level}`;
+  const stamp = document.createElement("span");
+  stamp.className = "backup-log-time";
+  stamp.textContent = time;
+  const text = document.createElement("span");
+  text.className = "backup-log-msg";
+  text.textContent = String(message);
+  line.append(stamp, text);
+  log.appendChild(line);
+  log.scrollTop = log.scrollHeight;
+}
+
+function resetBackupProgress() {
+  const panel = $("backup-progress");
+  if (panel) panel.hidden = true;
+  const log = $("backup-log");
+  if (log) log.innerHTML = "";
+  const finish = $("backup-finish");
+  if (finish) finish.hidden = true;
+  setBackupProgress(0, "Preparando restauração…");
+}
+
+function startBackupStageTicker() {
+  let index = 0;
+  const first = BACKUP_STEPS[index];
+  setBackupProgress(first.percent, first.label);
+  backupLogLine(first.label, "step");
+  const timer = window.setInterval(() => {
+    // Mantém em 4/5 até a resposta do servidor; 5/5 é aplicado na sincronização.
+    if (index >= BACKUP_STEPS.length - 2) return;
+    index += 1;
+    const step = BACKUP_STEPS[index];
+    setBackupProgress(step.percent, step.label);
+    backupLogLine(step.label, "step");
+  }, 850);
+  return timer;
+}
+
+function resetClinicalUiAfterRestore() {
+  renderToken += 1;
+  currentImage = null;
+  currentImageUrl = null;
+  state.patient = null;
+  state.sessions = {};
+  state.order = [];
+  state.sessionId = null;
+  state.patientPin = {};
+  state.unlockTarget = null;
+  state.step = 1;
+  state.polygon = [];
+  state.polygonActive = false;
+  closePatientModal();
+  closePinModal();
+  closeLockPatientModal();
+}
+
+/**
+ * Banner de falha segura, fora do modal.
+ *
+ * Mesmo que a camada do cartão do modal não repinte no Brave/Wayland, o
+ * usuário continua vendo o resumo da restauração e consegue fechar a caixa.
+ */
+function showRestoreBanner(title, detail, kind = "success") {
+  const banner = $("restore-banner");
+  if (!banner) return;
+  const titleNode = $("restore-banner-title");
+  const detailNode = $("restore-banner-detail");
+  if (titleNode) titleNode.textContent = title;
+  if (detailNode) detailNode.textContent = detail;
+  banner.classList.toggle("is-error", kind === "error");
+  banner.hidden = false;
+}
+
+function hideRestoreBanner() {
+  const banner = $("restore-banner");
+  if (banner) banner.hidden = true;
+}
+
+/**
+ * Fechar do banner também encerra o modal de perfil: se o cartão estiver
+ * branco/travado, este é o caminho garantido de saída.
+ */
+function dismissRestoreBanner() {
+  hideRestoreBanner();
+  const modal = $("profile-modal");
+  if (modal && !modal.hidden) closeProfileModal();
+}
+
+/**
+ * Garante que o cartão do modal de perfil continue visível com o relatório.
+ *
+ * Em Brave/Chromium sobre Wayland o cartão já apareceu completamente branco
+ * depois de uma restauração pesada: a camada composta era descartada e nada
+ * do conteúdo interno repintava. Aqui reexibimos o modal, forçamos um
+ * reflow real do cartão (display:none -> leitura de layout -> display) e
+ * rolados até o painel de progresso. O banner externo cobre o fail-safe.
+ */
+function revealBackupReport(scroll = true) {
+  const modal = $("profile-modal");
+  if (!modal) return;
+  modal.hidden = false;
+  modal.removeAttribute("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("has-modal");
+
+  // O relatório vive na aba de backup: ative-a antes de revelar progresso/logs.
+  switchProfileTab("backup");
+
+  const panel = $("backup-progress");
+  if (panel) {
+    panel.hidden = false;
+    panel.removeAttribute("hidden");
+  }
+
+  const head = modal.querySelector(".modal-head");
+  const body = modal.querySelector(".modal-body");
+  if (head) head.style.display = "flex";
+  if (body) body.style.display = "block";
+
+  if (panel && scroll && body) {
+    body.scrollTop = 0;
+  }
+}
+
+async function syncDirectoryAfterRestore() {
+  resetClinicalUiAfterRestore();
+  setScreen("directory");
+  const directory = $("patient-directory");
+  if (directory) directory.hidden = false;
+  const shell = document.querySelector(".app-shell");
+  if (shell) shell.hidden = true;
+  await loadProfile();
+  await loadPatients();
+  renderPatients();
+  // O modal de perfil permanece aberto com o relatório até "Concluir".
+  revealBackupReport();
+}
+
+async function finishBackupRestore() {
+  hideRestoreBanner();
+  closeProfileModal();
+  setScreen("directory");
+  const directory = $("patient-directory");
+  if (directory) directory.hidden = false;
+  const shell = document.querySelector(".app-shell");
+  if (shell) shell.hidden = true;
+  try {
+    await loadProfile();
+    await loadPatients();
+    renderPatients();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  } catch (error) {
+    toast(`Não foi possível recarregar os pacientes: ${error.message}`, "error", 6000);
+  }
+}
+
+function updateBackupFileStatus(file) {
+  const box = $("backup-file-drop");
+  const status = $("backup-file-status");
+  if (box) box.classList.toggle("has-file", Boolean(file));
+  if (status) {
+    if (file) {
+      const sizeKb = Math.max(1, Math.round(file.size / 1024));
+      status.textContent = `Arquivo carregado: ${file.name} (${sizeKb} KB)`;
+    } else {
+      status.textContent = "Nenhum arquivo selecionado. Clique acima para escolher ou arraste o .dmbak aqui.";
+    }
+  }
+}
+
 async function inspectBackupFile() {
-  const file = $("backup-file")?.files?.[0];
+  const file = state.selectedBackupFile || $("backup-file")?.files?.[0];
   const password = $("backup-restore-password")?.value || "";
   setLockError("backup-restore-error", "");
   const preview = $("backup-preview");
@@ -4572,13 +5281,14 @@ async function inspectBackupFile() {
     preview.hidden = true;
     preview.innerHTML = "";
   }
+  resetBackupProgress();
   state.backupSummary = null;
   if (!file) {
     setLockError("backup-restore-error", "Selecione um arquivo .dmbak para inspecionar.");
     return;
   }
   if (!password) {
-    setLockError("backup-restore-error", "Informe a senha mestra usada na exportação.");
+    setLockError("backup-restore-error", "Informe a senha definida na exportação (mestra ou do pacote).");
     return;
   }
   const form = new FormData();
@@ -4601,7 +5311,7 @@ async function inspectBackupFile() {
 }
 
 async function restoreBackupFile(mode) {
-  const file = $("backup-file")?.files?.[0];
+  const file = state.selectedBackupFile || $("backup-file")?.files?.[0];
   const password = $("backup-restore-password")?.value || "";
   setLockError("backup-restore-error", "");
   if (!file || !password) {
@@ -4618,26 +5328,97 @@ async function restoreBackupFile(mode) {
   if (!window.confirm(`Confirma ${verb}?\n\nUm snapshot automático pre_restore_*.dmbak será criado antes da restauração.`)) {
     return;
   }
+
   const form = new FormData();
   form.append("file", file);
   form.append("password", password);
   form.append("mode", mode);
-  setBusy(true, "Criando snapshot e restaurando backup…");
+
+  resetBackupProgress();
+  const panel = $("backup-progress");
+  if (panel) panel.hidden = false;
+  const finishButton = $("backup-finish");
+  if (finishButton) finishButton.hidden = true;
+  setBusy(true);
+  backupLogLine(`Arquivo selecionado: ${file.name} (${Math.max(1, Math.round(file.size / 1024))} KB)`, "info");
+  backupLogLine(`Modo escolhido: ${mode === "replace" ? "Substituir" : "Mesclar"}`, "info");
+  backupLogLine("Validação prévia concluída na inspeção do arquivo.", "success");
+  const ticker = startBackupStageTicker();
+  /** Preenchido assim que o backend confirma a restauração (antes do sync da tela). */
+  let restoreConfirmed = null;
+
   try {
     const result = await api("/api/backup/restore", { method: "POST", body: form });
-    const snapshot = result?.snapshot ? ` Snapshot: ${result.snapshot}` : "";
-    toast(
-      `Backup restaurado (${result.mode}): ${result.patients} novos, `
-      + `${result.patients_merged} mesclados, ${result.sessions} sessões, `
-      + `${result.images} imagens.${snapshot}`,
+    window.clearInterval(ticker);
+    restoreConfirmed = result;
+    setBackupProgress(80, BACKUP_STEPS[3].label);
+    (result.logs || []).forEach((message) => {
+      const text = String(message);
+      const level = /erro|falha|corromp|inválid|incorret/i.test(text) ? "error" : "success";
+      backupLogLine(text, level);
+    });
+    (result.imported_patients || []).forEach((patient) => {
+      const status = patient.status === "created"
+        ? "criado"
+        : patient.status === "merged"
+          ? "mesclado com dados locais"
+          : "ignorado";
+      backupLogLine(
+        `Paciente ${patient.patient_code} ${status} · `
+        + `${patient.sessions_count} sessão(ões) · ${patient.images_count ?? 0} imagem(ns)`,
+        patient.status === "skipped" ? "info" : "success",
+      );
+    });
+    setBackupProgress(90, BACKUP_STEPS[4].label);
+    backupLogLine("Recarregando GET /api/patients e re-renderizando o diretório…", "step");
+    await syncDirectoryAfterRestore();
+    const totalPatients = result.imported_patients?.length ?? 0;
+    const totalSessions = result.total_sessions ?? result.sessions ?? 0;
+    const totalMeasurements = result.total_measurements ?? result.measurements ?? 0;
+    const totalImages = result.total_images ?? result.images ?? 0;
+    setBackupProgress(100, "5/5 Prontuários sincronizados");
+    backupLogLine(
+      `Restauração concluída: ${totalPatients} paciente(s), ${totalSessions} sessão(ões), `
+      + `${totalMeasurements} medição(ões), ${totalImages} imagem(ns).`,
       "success",
-      8000,
     );
-    closeProfileModal();
-    await showDirectory();
+    if (result.backup_path) {
+      backupLogLine(`Snapshot preventivo: ${result.backup_path}`, "info");
+    }
+    if (finishButton) finishButton.hidden = false;
+    revealBackupReport();
+    showRestoreBanner(
+      `Backup restaurado: ${totalPatients} paciente(s), ${totalSessions} sessão(ões)`,
+      `Modo ${result.mode === "replace" ? "Substituir" : "Mesclar"} · `
+        + `${totalMeasurements} medição(ões) · ${totalImages} imagem(ns).`,
+      "success",
+    );
   } catch (error) {
-    setLockError("backup-restore-error", error.message);
+    window.clearInterval(ticker);
+    const message = error.message || "Falha desconhecida na restauração.";
+    if (restoreConfirmed) {
+      // O backend já gravou o backup; só a reidratação da tela falhou.
+      const patients = restoreConfirmed.imported_patients?.length ?? 0;
+      const sessions = restoreConfirmed.total_sessions ?? restoreConfirmed.sessions ?? 0;
+      setBackupProgress(100, "Restauração concluída; falha ao sincronizar a tela");
+      backupLogLine(`Backup já gravado no disco. Falha ao atualizar a tela: ${message}`, "error");
+      setLockError("backup-restore-error", `Backup gravado, mas a tela não sincronizou: ${message}`);
+      revealBackupReport();
+      showRestoreBanner(
+        `Backup restaurado: ${patients} paciente(s), ${sessions} sessão(ões)`,
+        `A tela não sincronizou: ${message}`,
+        "error",
+      );
+    } else {
+      setBackupProgress(100, "Falha na restauração");
+      backupLogLine(message, "error");
+      setLockError("backup-restore-error", message);
+      // Mesmo com erro o cartão precisa permanecer legível com o log da falha.
+      revealBackupReport();
+      showRestoreBanner("Falha na restauração", message, "error");
+    }
   } finally {
+    window.clearInterval(ticker);
     setBusy(false);
   }
 }
@@ -4862,6 +5643,9 @@ function bindEvents() {
   $("zoom-in")?.addEventListener("click", () => zoomAt(1.25, canvasSize.w / 2, canvasSize.h / 2));
   $("zoom-out")?.addEventListener("click", () => zoomAt(0.8, canvasSize.w / 2, canvasSize.h / 2));
   $("zoom-fit")?.addEventListener("click", resetView);
+  $("rail-collapse-left")?.addEventListener("click", () => toggleRail("left"));
+  $("rail-collapse-right")?.addEventListener("click", () => toggleRail("right"));
+  $("canvas-focus")?.addEventListener("click", toggleCanvasFocus);
   $("loupe-toggle")?.addEventListener("click", (event) => {
     state.loupe = !state.loupe;
     event.currentTarget.classList.toggle("is-active", state.loupe);
@@ -5009,22 +5793,79 @@ function bindPatientEvents() {
   $("password-form")?.addEventListener("submit", submitChangePassword);
   $("regenerate-key")?.addEventListener("click", regenerateRecoveryKeyFile);
   $("backup-export-full")?.addEventListener("click", exportFullBackup);
+  document.querySelectorAll("[data-profile-tab]").forEach((button) => {
+    button.addEventListener("click", () => switchProfileTab(button.dataset.profileTab));
+  });
+  document.querySelector(".profile-tabs")?.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    const order = ["profile", "security", "backup"];
+    const current = order.indexOf(state.profileTab);
+    let next = current;
+    if (event.key === "ArrowRight") next = (current + 1) % order.length;
+    if (event.key === "ArrowLeft") next = (current - 1 + order.length) % order.length;
+    if (event.key === "Home") next = 0;
+    if (event.key === "End") next = order.length - 1;
+    event.preventDefault();
+    switchProfileTab(order[next]);
+    document.querySelector(`[data-profile-tab="${order[next]}"]`)?.focus();
+  });
   $("backup-inspect")?.addEventListener("click", inspectBackupFile);
+  $("backup-finish")?.addEventListener("click", finishBackupRestore);
+  $("restore-banner-close")?.addEventListener("click", dismissRestoreBanner);
   $("backup-preview")?.addEventListener("click", (event) => {
     const button = event.target.closest("[data-backup-restore]");
     if (!button) return;
     restoreBackupFile(button.dataset.backupRestore);
   });
-  $("backup-file")?.addEventListener("change", () => {
+  $("backup-file")?.addEventListener("change", (event) => {
+    const file = event.target?.files?.[0] || null;
+    state.selectedBackupFile = file;
     state.backupSummary = null;
+    updateBackupFileStatus(file);
     const preview = $("backup-preview");
     if (preview) {
       preview.hidden = true;
       preview.innerHTML = "";
     }
+    resetBackupProgress();
     setLockError("backup-restore-error", "");
   });
+  const backupDrop = $("backup-file-drop");
+  if (backupDrop) {
+    backupDrop.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      backupDrop.classList.add("is-dragover");
+    });
+    backupDrop.addEventListener("dragleave", () => {
+      backupDrop.classList.remove("is-dragover");
+    });
+    backupDrop.addEventListener("drop", (event) => {
+      event.preventDefault();
+      backupDrop.classList.remove("is-dragover");
+      const file = event.dataTransfer?.files?.[0] || null;
+      if (!file) return;
+      state.selectedBackupFile = file;
+      state.backupSummary = null;
+      updateBackupFileStatus(file);
+      const input = $("backup-file");
+      if (input) {
+        try {
+          const dt = new DataTransfer();
+          dt.items.add(file);
+          input.files = dt.files;
+        } catch {}
+      }
+      resetBackupProgress();
+      setLockError("backup-restore-error", "");
+    });
+  }
   $("patient-export-backup")?.addEventListener("click", exportPatientCaseBackup);
+  $("export-case-form")?.addEventListener("submit", submitExportCaseBackup);
+  $("export-case-custom-password")?.addEventListener("change", syncExportCasePasswordField);
+  $("export-case-file-password-toggle")?.addEventListener("click", toggleExportCasePasswordVisibility);
+  document.querySelectorAll("[data-close-export-case]").forEach((node) => {
+    node.addEventListener("click", closeExportCaseModal);
+  });
   document.querySelectorAll("[data-close-profile]").forEach((node) => {
     node.addEventListener("click", closeProfileModal);
   });
@@ -5034,6 +5875,55 @@ function bindPatientEvents() {
   document.querySelectorAll("[data-close-patient-modal]").forEach((node) => {
     node.addEventListener("click", closePatientModal);
   });
+  document.querySelectorAll("[data-patient-tab]").forEach((button) => {
+    button.addEventListener("click", () => switchPatientTab(button.dataset.patientTab));
+    button.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      const index = PATIENT_TABS.indexOf(button.dataset.patientTab);
+      const delta = event.key === "ArrowRight" ? 1 : -1;
+      const next = (index + delta + PATIENT_TABS.length) % PATIENT_TABS.length;
+      switchPatientTab(PATIENT_TABS[next]);
+      document.querySelector(`[data-patient-tab="${PATIENT_TABS[next]}"]`)?.focus();
+    });
+  });
+  $("case-import-file")?.addEventListener("change", (event) => {
+    const file = event.target?.files?.[0] || null;
+    state.caseImport.file = file;
+    updateCaseImportFileStatus(file);
+    clearCaseImportPreview();
+    setLockError("case-import-error", "");
+  });
+  const caseDrop = $("case-import-drop");
+  if (caseDrop) {
+    caseDrop.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      caseDrop.classList.add("is-dragover");
+    });
+    caseDrop.addEventListener("dragleave", () => {
+      caseDrop.classList.remove("is-dragover");
+    });
+    caseDrop.addEventListener("drop", (event) => {
+      event.preventDefault();
+      caseDrop.classList.remove("is-dragover");
+      const file = event.dataTransfer?.files?.[0] || null;
+      if (!file) return;
+      state.caseImport.file = file;
+      updateCaseImportFileStatus(file);
+      const input = $("case-import-file");
+      if (input) {
+        try {
+          const dt = new DataTransfer();
+          dt.items.add(file);
+          input.files = dt.files;
+        } catch {}
+      }
+      clearCaseImportPreview();
+      setLockError("case-import-error", "");
+    });
+  }
+  $("case-import-validate")?.addEventListener("click", validateCaseImport);
+  $("case-import-submit")?.addEventListener("click", submitCaseImport);
   $("patient-search")?.addEventListener("input", (event) => {
     state.patientQuery = event.target.value || "";
     renderPatients();
@@ -5118,6 +6008,8 @@ function bindPatientEvents() {
 async function init() {
   state.files = {};
   state.step3Preview = false;
+  loadRailPreferences();
+  applyRailState();
   bindPatientEvents();
   bindEvents();
   updatePrivacyToggle();

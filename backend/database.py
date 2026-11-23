@@ -165,6 +165,20 @@ def db_utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def checkpoint() -> None:
+    """Sincroniza o SQLite após operações grandes (WAL e transações pendentes).
+
+    Cada chamada de ``connection()`` abre e fecha a sua própria conexão; este
+    helper garante que nenhuma transação antiga permaneça visível antes de a
+    API voltar a listar pacientes após uma restauração ``replace``.
+    """
+    with connection() as conn:
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.DatabaseError:  # pragma: no cover - journal não-WAL
+            pass
+
+
 def local_now_string() -> str:
     return db_utc_now()
 

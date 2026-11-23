@@ -64,6 +64,19 @@ _IMAGE_FIELDS = (
     "enhanced_image_path",
 )
 
+_NAME_PARTICLES = {
+    "de", "da", "do", "das", "dos", "e", "di", "du", "del", "della", "van", "von",
+}
+
+
+def mask_patient_name(full_name: str) -> str:
+    """Iniciais seguras para o relatório de importação (sem nome completo)."""
+    parts = [
+        part for part in str(full_name or "").split()
+        if part and part.lower() not in _NAME_PARTICLES
+    ]
+    return " ".join(f"{part[0].upper()}." for part in parts if part)
+
 
 class BackupError(ValueError):
     """Arquivo inválido, adulterado ou incompatível."""
@@ -243,22 +256,59 @@ def _patient_record(conn, row) -> dict[str, Any]:
     }
 
 
-def collect_records(patient_id: str | None = None) -> dict[str, Any]:
-    """Monta o ``records.json`` a partir do banco (dados já descriptografados)."""
+def collect_records(
+    patient_id: str | None = None,
+    patient_ids: list[str | int] | None = None,
+) -> dict[str, Any]:
+    """Monta o ``records.json`` a partir do banco (dados já descriptografados).
+
+    ``patient_id`` mantém a compatibilidade com a exportação individual antiga.
+    ``patient_ids`` exporta uma seleção arbitrária de pacientes e grava
+    ``mode: "selected"`` no manifesto. Todos os IDs precisam existir.
+    """
+    selected_ids: list[str] | None = None
+    if patient_ids is not None:
+        if isinstance(patient_ids, (str, int)):
+            patient_ids = [patient_ids]
+        selected_ids = []
+        for raw in patient_ids:
+            value = str(raw).strip()
+            if value and value not in selected_ids:
+                selected_ids.append(value)
+        if not selected_ids:
+            raise ValueError("Selecione ao menos um paciente para exportar.")
+
     with db.connection() as conn:
-        if patient_id:
+        if selected_ids is not None:
+            placeholders = ",".join("?" for _ in selected_ids)
+            rows = conn.execute(
+                f"SELECT * FROM patients WHERE id IN ({placeholders})",
+                selected_ids,
+            ).fetchall()
+            found = {str(row["id"]) for row in rows}
+            missing = [value for value in selected_ids if value not in found]
+            if missing:
+                raise LookupError(
+                    "Paciente(s) não encontrado(s) para exportação: "
+                    + ", ".join(missing)
+                )
+            rows = sorted(rows, key=lambda row: str(row["code"] or ""))
+            mode = "selected"
+        elif patient_id:
             rows = conn.execute(
                 "SELECT * FROM patients WHERE id = ?", (patient_id,)
             ).fetchall()
             if not rows:
                 raise LookupError("Paciente não encontrado para o backup.")
+            mode = "patient"
         else:
             rows = conn.execute("SELECT * FROM patients ORDER BY code").fetchall()
+            mode = "full"
         patients = [_patient_record(conn, row) for row in rows]
     return {
         "format_version": FORMAT_VERSION,
         "generated_at": _utc_now_iso(),
-        "mode": "patient" if patient_id else "full",
+        "mode": mode,
         "patients": patients,
     }
 
@@ -335,6 +385,10 @@ def _build_payload(
             "integrity": "hmac_sha256",
         },
     }
+    if records["mode"] == "selected":
+        manifest["selected_count"] = len(records.get("patients") or [])
+    elif records["mode"] == "patient" and manifest["patient_codes"]:
+        manifest["patient_code"] = manifest["patient_codes"][0]
     manifest_bytes = json.dumps(
         manifest, ensure_ascii=False, separators=(",", ":"), sort_keys=True
     ).encode("utf-8")
@@ -359,32 +413,56 @@ def _safe_relative_blob(relative: str) -> str:
 # Exportação
 # ---------------------------------------------------------------------------
 def export_backup(
-    password: str, patient_id: str | None = None
+    password: str,
+    patient_id: str | None = None,
+    patient_ids: list[str | int] | None = None,
+    archive_password: str | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
-    """Gera o arquivo ``.dmbak`` (completo ou de um único paciente)."""
-    records = collect_records(patient_id)
+    """Gera o arquivo ``.dmbak`` completo, individual ou de uma seleção.
+
+    ``password`` valida a estação no endpoint; o envelope pode ser cifrado com
+    uma ``archive_password`` dedicada (quando informada). Sem ela, usa a
+    própria senha mestra.
+    """
+    records = collect_records(patient_id, patient_ids=patient_ids)
     blobs = _collect_blobs(records)
     payload, manifest = _build_payload(records, blobs, db.get_profile())
-    data = encrypt_backup_bytes(payload, password)
+    envelope_password = str(archive_password or "").strip() or password
+    data = encrypt_backup_bytes(payload, envelope_password)
     summary = {
         "mode": records["mode"],
         "created_at": manifest["created_at"],
         "patient_codes": manifest["patient_codes"],
         "counts": manifest["counts"],
         "size_bytes": len(data),
+        "has_archive_password": bool(
+            str(archive_password or "").strip()
+            and str(archive_password).strip() != password
+        ),
     }
+    if records["mode"] == "selected":
+        summary["selected_count"] = manifest.get("selected_count", len(records["patients"]))
     return data, summary
 
 
 def backup_filename(summary: dict[str, Any]) -> str:
-    """Nome de download: completo por data/hora, individual pelo código."""
-    if summary.get("mode") == "patient" and summary.get("patient_codes"):
-        code = "".join(
-            ch for ch in str(summary["patient_codes"][0]) if ch.isalnum() or ch in "-_"
-        )
-        return f"{code or 'DermaMetric-Paciente'}.dmbak"
+    """Nome de download claro conforme modo e quantidade de pacientes."""
+    codes = [
+        "".join(ch for ch in str(code) if ch.isalnum() or ch in "-_")
+        for code in (summary.get("patient_codes") or [])
+        if str(code).strip()
+    ]
+    mode = summary.get("mode")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
-    return f"DermaMetric-Backup-{stamp}.dmbak"
+    day = datetime.now(timezone.utc).strftime("%Y%m%d")
+
+    if mode == "patient" and codes:
+        return f"DermaMetric-Caso-{codes[0] or 'Paciente'}-{day}.dmbak"
+    if mode == "selected":
+        if len(codes) == 1:
+            return f"DermaMetric-{codes[0]}-{day}.dmbak"
+        return f"DermaMetric-Selecao-{len(codes)}pacs-{stamp}.dmbak"
+    return f"DermaMetric-Backup-Completo-{stamp}.dmbak"
 
 
 # ---------------------------------------------------------------------------
@@ -458,7 +536,7 @@ def inspect_backup(data: bytes, password: str) -> dict[str, Any]:
     conflicts = [code for code in codes if code in existing]
     counts = dict(manifest.get("counts") or {})
     counts.setdefault("patients", len(codes))
-    return {
+    result = {
         "format_version": manifest.get("format_version"),
         "created_at": manifest.get("created_at"),
         "mode": manifest.get("mode"),
@@ -470,6 +548,11 @@ def inspect_backup(data: bytes, password: str) -> dict[str, Any]:
         "encryption": manifest.get("encryption") or {},
         "size_bytes": len(data),
     }
+    if manifest.get("mode") == "selected":
+        result["selected_count"] = manifest.get("selected_count", len(codes))
+    elif manifest.get("mode") == "patient":
+        result["patient_code"] = manifest.get("patient_code") or (codes[0] if codes else "")
+    return result
 
 
 def _encrypt_optional(value: Any) -> str | None:
@@ -673,13 +756,40 @@ def _merge_session(
             )
 
 
-def _apply_records(records: dict[str, Any], mode: str) -> dict[str, int]:
+def _patient_blob_count(patient: dict[str, Any], blob_relatives: set[str]) -> int:
+    """Conta imagens do paciente cujos blobs existem no envelope."""
+    count = 0
+    seen: set[str] = set()
+    for session in patient.get("sessions") or []:
+        for field in _IMAGE_FIELDS:
+            relative = session.get(field)
+            if not relative or relative in seen:
+                continue
+            seen.add(str(relative))
+            if str(relative) in blob_relatives:
+                count += 1
+    return count
+
+
+def _apply_records(
+    records: dict[str, Any],
+    mode: str,
+    blob_relatives: set[str],
+    import_as_new: bool = False,
+) -> dict[str, Any]:
+    """Aplica pacientes/sessões e devolve estatísticas + relatório por paciente.
+
+    Em ``merge`` de um caso único, ``import_as_new`` cria uma cópia do
+    prontuário com um novo código público (``PAC-XXXXXX``) quando o código de
+    origem já existe na estação, em vez de mesclar no prontuário local.
+    """
     stats = {
         "patients": 0,
         "patients_merged": 0,
         "sessions": 0,
         "measurements": 0,
     }
+    imported: list[dict[str, Any]] = []
     with db.connection() as conn:
         if mode == "replace":
             conn.execute("DELETE FROM striae_measurements")
@@ -689,11 +799,42 @@ def _apply_records(records: dict[str, Any], mode: str) -> dict[str, int]:
             conn.execute("DELETE FROM patients")
         for patient in records.get("patients") or []:
             code = str(patient.get("code") or "")
+            sessions = patient.get("sessions") or []
+            images_count = _patient_blob_count(patient, blob_relatives)
+            masked = mask_patient_name(str(patient.get("name") or ""))
             existing_patient = None
             if mode == "merge" and code:
                 existing_patient = conn.execute(
                     "SELECT * FROM patients WHERE code = ?", (code,)
                 ).fetchone()
+            if existing_patient is not None and import_as_new:
+                # Cópia independente do caso recebido: novo código público,
+                # novas sessões e nenhuma escrita no prontuário local.
+                copy_patient = dict(patient)
+                copy_patient["id"] = secrets.token_hex(16)
+                copy_patient["code"] = db.generate_patient_code(conn)
+                new_id = _insert_patient(conn, copy_patient)
+                stats["patients"] += 1
+                for session in sessions:
+                    session_code = str(session.get("session_code") or "T0")
+                    incoming = dict(session)
+                    incoming["id"] = f"{new_id}:{session_code}"
+                    _insert_session(conn, incoming, new_id)
+                    stats["sessions"] += 1
+                    stats["measurements"] += len(session.get("measurements") or [])
+                imported.append(
+                    {
+                        "id": new_id,
+                        "patient_code": copy_patient["code"],
+                        "source_patient_code": code or str(patient.get("id") or ""),
+                        "masked_name": masked,
+                        "sessions_count": len(sessions),
+                        "images_count": images_count,
+                        "status": "created_copy",
+                    }
+                )
+                continue
+
             if existing_patient is not None:
                 local_id = existing_patient["id"]
                 stats["patients_merged"] += 1
@@ -703,7 +844,7 @@ def _apply_records(records: dict[str, Any], mode: str) -> dict[str, int]:
                         "SELECT * FROM sessions WHERE patient_id = ?", (local_id,)
                     )
                 }
-                for session in patient.get("sessions") or []:
+                for session in sessions:
                     session_code = str(session.get("session_code") or "T0")
                     existing_session = local_sessions.get(session_code)
                     if existing_session is not None:
@@ -714,15 +855,61 @@ def _apply_records(records: dict[str, Any], mode: str) -> dict[str, int]:
                         _insert_session(conn, incoming, local_id)
                         stats["sessions"] += 1
                     stats["measurements"] += len(session.get("measurements") or [])
+                imported.append(
+                    {
+                        "id": local_id,
+                        "patient_code": code or local_id,
+                        "masked_name": masked,
+                        "sessions_count": len(sessions),
+                        "images_count": images_count,
+                        "status": "merged",
+                    }
+                )
                 continue
 
             patient_id = _insert_patient(conn, patient)
             stats["patients"] += 1
-            for session in patient.get("sessions") or []:
+            for session in sessions:
                 _insert_session(conn, session, patient_id)
                 stats["sessions"] += 1
                 stats["measurements"] += len(session.get("measurements") or [])
-    return stats
+            imported.append(
+                {
+                    "id": patient_id,
+                    "patient_code": code or patient_id,
+                    "masked_name": masked,
+                    "sessions_count": len(sessions),
+                    "images_count": images_count,
+                    "status": "created",
+                }
+            )
+    return {"stats": stats, "imported_patients": imported}
+
+
+def _verify_integrity(imported: list[dict[str, Any]]) -> None:
+    """Confirma que os pacientes importados estão legíveis e o SQLite íntegro."""
+    with db.connection() as conn:
+        for item in imported:
+            row = conn.execute(
+                "SELECT code FROM patients WHERE id = ?", (item["id"],)
+            ).fetchone()
+            if row is None:
+                raise BackupError(
+                    f"Integridade comprometida: paciente {item['patient_code']} ausente."
+                )
+            total = conn.execute(
+                "SELECT COUNT(*) AS total FROM sessions WHERE patient_id = ?",
+                (item["id"],),
+            ).fetchone()["total"]
+            if int(total) < int(item["sessions_count"]):
+                raise BackupError(
+                    f"Integridade comprometida: sessões ausentes para "
+                    f"{item['patient_code']}."
+                )
+        result = conn.execute("PRAGMA quick_check").fetchone()[0]
+        if str(result).lower() != "ok":
+            raise BackupError(f"Falha na verificação de integridade do SQLite: {result}")
+
 
 
 def _write_blobs(blobs: dict[str, bytes]) -> int:
@@ -748,15 +935,49 @@ def _write_blobs(blobs: dict[str, bytes]) -> int:
     return written
 
 
-def restore_backup(data: bytes, password: str, mode: str = "merge") -> dict[str, Any]:
-    """Restaura o backup, criando antes um snapshot de segurança local."""
+def restore_backup(
+    data: bytes,
+    password: str,
+    mode: str = "merge",
+    import_as_new: bool = False,
+) -> dict[str, Any]:
+    """Restaura o backup, criando antes um snapshot de segurança local.
+
+    Devolve um relatório estruturado com ``logs`` cronológicos e
+    ``imported_patients`` para a interface acompanhar cada etapa.
+    ``import_as_new`` vale para casos únicos em ``merge``: quando o código de
+    origem já existe, cria um prontuário novo (novo ``PAC-XXXXXX``) em vez de
+    mesclar no prontuário local.
+    """
     if mode not in {"merge", "replace"}:
         raise BackupError("Modo de restauração inválido. Use 'merge' ou 'replace'.")
     parsed = read_backup(data, password)
     records = parsed["records"]
     manifest = parsed["manifest"]
+    version = manifest.get("format_version") or FORMAT_VERSION
+    source_counts = manifest.get("counts") or {}
+    logs: list[str] = [
+        f"Assinatura DMBAK v{version} validada",
+        "Senha mestra e integridade HMAC-SHA256 confirmadas",
+        (
+            f"Backup contém {source_counts.get('patients', 0)} paciente(s), "
+            f"{source_counts.get('sessions', 0)} sessão(ões) e "
+            f"{source_counts.get('images', source_counts.get('blobs', 0))} imagem(ns)"
+        ),
+    ]
+    if mode == "replace":
+        logs.append(
+            "Modo substituir: dados clínicos anteriores serão removidos; "
+            "credenciais da estação e DEK local permanecem intactas"
+        )
+    elif import_as_new and manifest.get("mode") == "patient":
+        logs.append(
+            "Modo mesclar como novo: códigos repetidos gerarão um novo "
+            "prontuário, sem alterar o caso local"
+        )
 
     # Snapshot automático do estado atual antes de qualquer gravação.
+    logs.append("Criando snapshot preventivo do banco atual…")
     snapshot_bytes, _ = export_backup(password)
     # ``db.DATA_DIR`` deriva de ``backend.paths.DATA_DIR`` (perfil do usuário
     # quando empacotado), mantendo os snapshots junto aos dados persistentes.
@@ -773,19 +994,73 @@ def restore_backup(data: bytes, password: str, mode: str = "merge") -> dict[str,
         snapshot_path.chmod(0o600)
     except OSError:  # pragma: no cover
         pass
+    logs.append(f"Snapshot preventivo salvo em {snapshot_path}")
 
-    stats = _apply_records(records, mode)
+    blob_relatives = {
+        name[len(BLOB_PREFIX):]
+        for name in parsed["blobs"]
+        if name.startswith(BLOB_PREFIX)
+    }
+    applied = _apply_records(
+        records, mode, blob_relatives, import_as_new=import_as_new
+    )
+    stats = applied["stats"]
+    imported = applied["imported_patients"]
+
+    for item in imported:
+        verb = "importado"
+        if item["status"] == "merged":
+            verb = "mesclado"
+        elif item["status"] == "created_copy":
+            verb = (
+                "importado como novo prontuário "
+                f"(origem {item.get('source_patient_code') or '—'})"
+            )
+        images_label = (
+            f"{item['images_count']} imagem(ns) recifrada(s)"
+            if item["images_count"]
+            else "sem imagens no envelope"
+        )
+        logs.append(
+            f"Paciente {item['patient_code']} {verb} "
+            f"({item['sessions_count']} sessão(ões), {images_label})"
+        )
+
     images = _write_blobs(parsed["blobs"])
+    logs.append(f"{images} imagem(ns) gravada(s) e recifrada(s) no storage local")
+
+    # Fecha qualquer transação pendente e sincroniza o SQLite antes de servir
+    # novas requisições (o token/DEK da estação não são tocados).
+    db.checkpoint()
+    _verify_integrity(imported)
+    total_sessions = sum(int(item["sessions_count"]) for item in imported)
+    total_patients = len(imported)
+    logs.append(
+        f"Integridade do banco verificada ({total_patients} paciente(s), "
+        f"{total_sessions} sessão(ões) legíveis)"
+    )
+    logs.append(f"Restauração em modo '{mode}' concluída com sucesso")
+
     return {
+        "ok": True,
         "restored": True,
         "mode": mode,
+        "backup_path": str(snapshot_path),
         "source_created_at": manifest.get("created_at"),
         "source_mode": manifest.get("mode"),
+        "source_patient_code": manifest.get("patient_code"),
+        "import_as_new": bool(import_as_new),
         "patient_codes": manifest.get("patient_codes") or [],
+        "imported_patients": imported,
         "patients": stats["patients"],
         "patients_merged": stats["patients_merged"],
-        "sessions": stats["sessions"],
+        "sessions": total_sessions,
         "measurements": stats["measurements"],
         "images": images,
+        "total_patients": total_patients,
+        "total_sessions": total_sessions,
+        "total_measurements": stats["measurements"],
+        "total_images": images,
         "snapshot": snapshot_path.name,
+        "logs": logs,
     }

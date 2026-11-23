@@ -1197,7 +1197,7 @@ async def _read_backup_upload(upload: UploadFile) -> bytes:
 
 @app.post("/api/backup/export")
 def backup_export(payload: dict[str, Any], request: Request) -> Response:
-    """Exporta um backup completo (ou de um paciente) cifrado em ``.dmbak``."""
+    """Exporta um backup completo, individual ou de pacientes selecionados."""
     _require_station_access(request)
     password = str(payload.get("password") or "")
     if not password:
@@ -1212,8 +1212,38 @@ def backup_export(payload: dict[str, Any], request: Request) -> Response:
         if not patient_id:
             patient_id = None
 
+    patient_ids: list[str] | None = None
+    raw_patient_ids = payload.get("patient_ids")
+    if raw_patient_ids is not None:
+        if not isinstance(raw_patient_ids, (list, tuple, set)):
+            raise HTTPException(
+                status_code=400,
+                detail="'patient_ids' deve ser uma lista de identificadores de pacientes.",
+            )
+        patient_ids = []
+        for raw in raw_patient_ids:
+            value = str(raw or "").strip()
+            if value and value not in patient_ids:
+                patient_ids.append(value)
+        if not patient_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="Selecione ao menos um paciente para exportar.",
+            )
+
+    archive_password: str | None = payload.get("archive_password")
+    if archive_password is not None:
+        archive_password = str(archive_password)
+        if not archive_password.strip():
+            archive_password = None
+
     try:
-        data, summary = backup_mod.export_backup(password, patient_id=patient_id)
+        data, summary = backup_mod.export_backup(
+            password,
+            patient_id=patient_id,
+            patient_ids=patient_ids,
+            archive_password=archive_password,
+        )
     except Exception as exc:  # noqa: BLE001 - mapeado para HTTP
         raise _backup_error(exc) from exc
 
@@ -1251,8 +1281,13 @@ async def backup_restore(
     file: UploadFile = File(...),
     password: str = Form(...),
     mode: str = Form("merge"),
+    import_as_new: bool = Form(False),
 ) -> dict[str, Any]:
     """Restaura um ``.dmbak`` em modo ``merge`` ou ``replace``.
+
+    ``import_as_new`` só tem efeito em ``merge`` de caso único: se o código de
+    origem já existir na estação, cria um prontuário novo (``PAC-XXXXXX``) em
+    vez de mesclar no prontuário local.
 
     Um snapshot completo do estado atual é gravado automaticamente em
     ``data/backups/pre_restore_*.dmbak`` antes de qualquer escrita.
@@ -1266,7 +1301,9 @@ async def backup_restore(
         )
     data = await _read_backup_upload(file)
     try:
-        return backup_mod.restore_backup(data, password, mode=mode)
+        return backup_mod.restore_backup(
+            data, password, mode=mode, import_as_new=import_as_new
+        )
     except Exception as exc:  # noqa: BLE001 - mapeado para HTTP
         raise _backup_error(exc) from exc
 

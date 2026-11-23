@@ -40,6 +40,7 @@ from backend import backup, database as db, security  # noqa: E402
 from backend.main import app  # noqa: E402
 
 PASSWORD = "senha-mestra-backup-1"
+ARCHIVE_PASSWORD = "senha-do-pacote-selecionado-1"
 BACKUP_MAGIC = b"DMBAK\x01\x00\x00"
 MEDIA_TYPE = "application/vnd.dermametric.backup"
 
@@ -146,11 +147,21 @@ def inspect_file(client, headers, content: bytes, password: str = PASSWORD):
     )
 
 
-def restore_file(client, headers, content: bytes, mode: str, password: str = PASSWORD):
+def restore_file(
+    client,
+    headers,
+    content: bytes,
+    mode: str,
+    password: str = PASSWORD,
+    import_as_new: bool = False,
+):
+    data = {"password": password, "mode": mode}
+    if import_as_new:
+        data["import_as_new"] = "true"
     return client.post(
         "/api/backup/restore",
         files={"file": ("backup.dmbak", content, MEDIA_TYPE)},
-        data={"password": password, "mode": mode},
+        data=data,
         headers=headers,
     )
 
@@ -220,17 +231,203 @@ def test_individual_patient_backup(station):
 
     response = export_file(client, headers, patient_id=target["id"])
     assert response.content.startswith(BACKUP_MAGIC)
-    assert 'filename="PAC-INDIV1.dmbak"' in response.headers["content-disposition"]
+    disposition = response.headers["content-disposition"]
+    assert 'filename="DermaMetric-Caso-PAC-INDIV1-' in disposition
+    assert disposition.endswith('.dmbak"')
 
     parsed = backup.read_backup(response.content, PASSWORD)
     assert parsed["manifest"]["mode"] == "patient"
+    assert parsed["manifest"]["patient_code"] == "PAC-INDIV1"
     assert parsed["manifest"]["patient_codes"] == ["PAC-INDIV1"]
     assert parsed["manifest"]["counts"]["patients"] == 1
     assert len(parsed["records"]["patients"]) == 1
 
     summary = inspect_file(client, headers, response.content).json()
     assert summary["mode"] == "patient"
+    assert summary["patient_code"] == "PAC-INDIV1"
     assert summary["patient_codes"] == ["PAC-INDIV1"]
+
+
+def test_single_case_backup_with_dedicated_archive_password(station):
+    """Caso único pode ser enviado a outro profissional com senha própria."""
+    client, headers = station
+    target = measured_case(client, headers, "PAC-CASE01", "Helena Duarte")
+    measured_case(client, headers, "PAC-CASE02", "Não vai no arquivo")
+
+    response = client.post(
+        "/api/backup/export",
+        json={
+            "password": PASSWORD,
+            "patient_id": target["id"],
+            "archive_password": ARCHIVE_PASSWORD,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    content = response.content
+    disposition = response.headers["content-disposition"]
+    assert 'filename="DermaMetric-Caso-PAC-CASE01-' in disposition
+
+    parsed = backup.read_backup(content, ARCHIVE_PASSWORD)
+    manifest = parsed["manifest"]
+    assert manifest["mode"] == "patient"
+    assert manifest["patient_code"] == "PAC-CASE01"
+    assert manifest["patient_codes"] == ["PAC-CASE01"]
+    assert manifest["counts"]["patients"] == 1
+    assert [p["code"] for p in parsed["records"]["patients"]] == ["PAC-CASE01"]
+
+    # A senha mestra não abre um envelope protegido pela senha do caso.
+    with pytest.raises(backup.BackupPasswordError):
+        backup.read_backup(content, PASSWORD)
+
+    inspected = inspect_file(client, headers, content, password=ARCHIVE_PASSWORD).json()
+    assert inspected["mode"] == "patient"
+    assert inspected["patient_code"] == "PAC-CASE01"
+    assert inspected["conflicts"] == ["PAC-CASE01"]
+
+    # Importando como novo, o caso de outro profissional não sobrescreve o local.
+    restored = restore_file(
+        client,
+        headers,
+        content,
+        "merge",
+        password=ARCHIVE_PASSWORD,
+        import_as_new=True,
+    )
+    assert restored.status_code == 200, restored.text
+    body = restored.json()
+    assert body["source_mode"] == "patient"
+    assert body["source_patient_code"] == "PAC-CASE01"
+    assert body["import_as_new"] is True
+    assert body["patients"] == 1
+    assert body["patients_merged"] == 0
+    assert body["imported_patients"][0]["status"] == "created_copy"
+    new_code = body["imported_patients"][0]["patient_code"]
+    assert new_code.startswith("PAC-") and new_code != "PAC-CASE01"
+
+    listed = client.get("/api/patients").json()["patients"]
+    codes = {patient["code"] for patient in listed}
+    assert {"PAC-CASE01", "PAC-CASE02", new_code} <= codes
+    # Prontuário local preservado; a cópia recebeu um código novo.
+    original = next(patient for patient in listed if patient["code"] == "PAC-CASE01")
+    assert original["sessions_total"] == 2
+    copy = next(patient for patient in listed if patient["code"] == new_code)
+    assert copy["sessions_total"] == 2
+
+
+def test_merge_single_case_without_import_as_new_merges_local(station):
+    client, headers = station
+    target = measured_case(client, headers, "PAC-MERGE1", "Paciente Local")
+    response = export_file(client, headers, patient_id=target["id"])
+
+    restored = restore_file(client, headers, response.content, "merge")
+    assert restored.status_code == 200, restored.text
+    body = restored.json()
+    assert body["patients_merged"] == 1
+    assert body["patients"] == 0
+    assert body["imported_patients"][0]["status"] == "merged"
+    assert len(client.get("/api/patients").json()["patients"]) == 1
+
+
+def test_selected_patients_backup_with_dedicated_password_and_merge_restore(station):
+    """Seleção de p1+p3, envelope com senha própria e restauração em merge."""
+    client, headers = station
+    first = measured_case(client, headers, "PAC-SEL001", "Ana Paula Souza")
+    second = measured_case(client, headers, "PAC-SEL002", "Bruno Lima")
+    third = measured_case(client, headers, "PAC-SEL003", "Carla Mendes")
+
+    response = client.post(
+        "/api/backup/export",
+        json={
+            "password": PASSWORD,
+            "patient_ids": [first["id"], third["id"]],
+            "archive_password": ARCHIVE_PASSWORD,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    content = response.content
+    assert content.startswith(BACKUP_MAGIC)
+    disposition = response.headers["content-disposition"]
+    assert "DermaMetric-Selecao-2pacs-" in disposition and disposition.endswith('.dmbak"')
+
+    parsed = backup.read_backup(content, ARCHIVE_PASSWORD)
+    manifest = parsed["manifest"]
+    assert manifest["mode"] == "selected"
+    assert manifest["selected_count"] == 2
+    assert manifest["counts"]["patients"] == 2
+    assert manifest["counts"]["sessions"] == 4
+    assert set(manifest["patient_codes"]) == {"PAC-SEL001", "PAC-SEL003"}
+    records = parsed["records"]
+    assert {p["code"] for p in records["patients"]} == {"PAC-SEL001", "PAC-SEL003"}
+    assert second["code"] not in {p["code"] for p in records["patients"]}
+    session = records["patients"][0]["sessions"][0]
+    assert session["measurements"] and session["landmarks"] and session["healthy_skin_roi"]
+    assert parsed["blobs"], "imagens dos pacientes selecionados devem ir no envelope"
+
+    # A senha mestra não abre um envelope cifrado com a senha do pacote.
+    with pytest.raises(backup.BackupPasswordError):
+        backup.read_backup(content, PASSWORD)
+
+    inspected = inspect_file(client, headers, content, password=ARCHIVE_PASSWORD)
+    assert inspected.status_code == 200, inspected.text
+    body = inspected.json()
+    assert body["mode"] == "selected"
+    assert body["selected_count"] == 2
+    assert set(body["patient_codes"]) == {"PAC-SEL001", "PAC-SEL003"}
+
+    # Restaura somente os dois pacientes selecionados, com a senha do pacote.
+    wipe_clinical_tables()
+    restored = restore_file(
+        client, headers, content, "merge", password=ARCHIVE_PASSWORD
+    )
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["source_mode"] == "selected"
+    listed = client.get("/api/patients").json()
+    codes = {patient["code"] for patient in listed["patients"]}
+    assert codes == {"PAC-SEL001", "PAC-SEL003"}
+    assert len(listed["patients"]) == 2
+
+
+def test_selected_single_patient_uses_master_password_and_clear_filename(station):
+    client, headers = station
+    target = measured_case(client, headers, "PAC-ONE001", "Paciente Único")
+    measured_case(client, headers, "PAC-ONE002", "Não selecionado")
+
+    response = client.post(
+        "/api/backup/export",
+        json={"password": PASSWORD, "patient_ids": [target["id"]]},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    disposition = response.headers["content-disposition"]
+    assert 'filename="DermaMetric-PAC-ONE001-' in disposition
+    assert disposition.endswith('.dmbak"')
+
+    parsed = backup.read_backup(response.content, PASSWORD)
+    assert parsed["manifest"]["mode"] == "selected"
+    assert parsed["manifest"]["selected_count"] == 1
+    assert parsed["manifest"]["patient_codes"] == ["PAC-ONE001"]
+
+
+def test_selected_export_validates_ids_and_empty_selection(station):
+    client, headers = station
+    target = measured_case(client, headers, "PAC-VALID1", "Paciente Válido")
+
+    empty = client.post(
+        "/api/backup/export",
+        json={"password": PASSWORD, "patient_ids": []},
+        headers=headers,
+    )
+    assert empty.status_code == 400
+
+    missing = client.post(
+        "/api/backup/export",
+        json={"password": PASSWORD, "patient_ids": [target["id"], "paciente-inexistente"]},
+        headers=headers,
+    )
+    assert missing.status_code == 404
+    assert "paciente-inexistente" in missing.json()["detail"]
 
 
 def test_rejects_tampered_fake_and_wrong_password(station):
@@ -281,12 +478,51 @@ def test_restore_replace_into_clean_database(station):
     restored = restore_file(client, headers, content, mode="replace")
     assert restored.status_code == 200, restored.text
     body = restored.json()
+    assert body["ok"] is True
     assert body["mode"] == "replace"
     assert body["patients"] == 1
     assert body["sessions"] == 2
     assert body["measurements"] == 1
     assert body["images"] >= 2
     assert body["snapshot"].startswith("pre_restore_") and body["snapshot"].endswith(".dmbak")
+    assert body["backup_path"].endswith(".dmbak")
+    assert Path(body["backup_path"]).exists()
+    assert body["total_patients"] == 1
+    assert body["total_sessions"] == 2
+    assert body["total_measurements"] == 1
+    assert body["total_images"] >= 2
+    assert isinstance(body["logs"], list) and len(body["logs"]) >= 5
+    logs = " | ".join(body["logs"])
+    assert "Assinatura DMBAK v1 validada" in logs
+    assert "Snapshot preventivo salvo em" in logs
+    assert "Integridade do banco verificada" in logs
+    assert len(body["imported_patients"]) == 1
+    imported = body["imported_patients"][0]
+    assert imported["status"] == "created"
+    assert imported["patient_code"] == "PAC-REST01"
+    assert imported["masked_name"] == "H. C. F."
+    assert imported["sessions_count"] == 2
+    assert imported["images_count"] >= 2
+
+    # GET /api/patients e /api/patients/{id} respondem imediatamente após o
+    # replace, com a sessão autenticada da estação ainda válida (token/DEK).
+    listing = client.get("/api/patients", headers=headers)
+    assert listing.status_code == 200, listing.text
+    listed = {p["code"]: p for p in listing.json()["patients"]}
+    assert set(listed) == {"PAC-REST01"}
+    assert listed["PAC-REST01"]["sessions_total"] == 2
+    detail = client.get(f"/api/patients/{patient['id']}", headers=headers)
+    assert detail.status_code == 200, detail.text
+    detail_patient = detail.json()
+    assert detail_patient["code"] == "PAC-REST01"
+    assert len(detail_patient["sessions"]) == 2
+    assert len(detail_patient["sessions"][0]["measurements"]) == 1
+    for session in detail_patient["sessions"]:
+        if not session["clean_image_url"]:
+            continue
+        image = client.get(session["clean_image_url"])
+        assert image.status_code == 200
+        assert image.content.startswith(b"\x89PNG")
 
     # Snapshot automático existe, é um .dmbak válido e legível.
     snapshot_path = Path(db.DATA_DIR) / "backups" / body["snapshot"]
@@ -365,10 +601,41 @@ def test_merge_preserves_local_and_imports_missing(station):
     restored = restore_file(client, headers, content, mode="merge")
     assert restored.status_code == 200, restored.text
     body = restored.json()
+    assert body["ok"] is True
     assert body["mode"] == "merge"
     assert body["patients_merged"] >= 1
     assert body["patients"] >= 1
     assert body["snapshot"].startswith("pre_restore_")
+    assert body["backup_path"].endswith(".dmbak") and Path(body["backup_path"]).exists()
+    assert body["total_sessions"] == 4
+    assert body["total_measurements"] == 2
+    assert body["total_images"] >= 4
+    assert isinstance(body["logs"], list) and len(body["logs"]) >= 5
+    logs = " | ".join(body["logs"])
+    assert "Assinatura DMBAK v1 validada" in logs
+    assert "Integridade do banco verificada" in logs
+    statuses = {p["patient_code"]: p["status"] for p in body["imported_patients"]}
+    assert statuses == {"PAC-MERGE1": "merged", "PAC-MERGE2": "created"}
+    imported_by_code = {p["patient_code"]: p for p in body["imported_patients"]}
+    assert imported_by_code["PAC-MERGE2"]["sessions_count"] == 2
+    assert imported_by_code["PAC-MERGE2"]["images_count"] >= 2
+
+    # Leitura imediata pela API após o merge, usando o token da estação.
+    listing = client.get("/api/patients", headers=headers)
+    assert listing.status_code == 200, listing.text
+    listed = {p["code"]: p for p in listing.json()["patients"]}
+    assert set(listed) == {"PAC-MERGE1", "PAC-MERGE2", "PAC-LOCAL"}
+    detail = client.get(
+        f"/api/patients/{imported_by_code['PAC-MERGE2']['id']}", headers=headers
+    )
+    assert detail.status_code == 200, detail.text
+    detail_patient = detail.json()
+    assert detail_patient["code"] == "PAC-MERGE2"
+    assert len(detail_patient["sessions"]) == 2
+    assert len(detail_patient["sessions"][0]["measurements"]) == 1
+    image = client.get(detail_patient["sessions"][0]["clean_image_url"])
+    assert image.status_code == 200
+    assert image.content.startswith(b"\x89PNG")
 
     after = {p["code"]: p for p in db.list_patients()}
     assert set(after) == {"PAC-MERGE1", "PAC-MERGE2", "PAC-LOCAL"}

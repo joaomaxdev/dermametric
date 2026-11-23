@@ -226,109 +226,138 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
         </button>
       </header>
+      <div class="profile-tabs segmented grow" role="tablist" aria-label="Seções do perfil">
+        <button type="button" role="tab" id="profile-tab-profile" data-profile-tab="profile" class="is-active" aria-selected="true" aria-controls="profile-panel-profile">Dados do Profissional</button>
+        <button type="button" role="tab" id="profile-tab-security" data-profile-tab="security" aria-selected="false" aria-controls="profile-panel-security" tabindex="-1">Segurança e Chave</button>
+        <button type="button" role="tab" id="profile-tab-backup" data-profile-tab="backup" aria-selected="false" aria-controls="profile-panel-backup" tabindex="-1">Backup da Estação</button>
+      </div>
       <div class="modal-body">
-        <form id="profile-form" class="form-stack" novalidate>
-          <p class="form-hint">Estes dados aparecem no cabeçalho e na assinatura dos laudos em PDF.</p>
-          <div class="field">
-            <span>Nome do profissional</span>
-            <input id="profile-name" type="text" maxlength="120" placeholder="ex.: Dra. Maria Silva" />
-            <small>Nome completo do responsável técnico.</small>
-          </div>
-          <div class="field">
-            <span>Registro profissional</span>
-            <input id="profile-registry" type="text" maxlength="80" placeholder="ex.: CREFITO-6 123456-F ou CRM-CE 12345" />
-            <small>Conselho, número e UF.</small>
-          </div>
-          <div class="field">
-            <span>Instituição (opcional)</span>
-            <input id="profile-institution" type="text" maxlength="120" placeholder="ex.: Clínica / Universidade" />
-          </div>
-          <p id="profile-error" class="form-hint is-error" hidden></p>
-          <div class="form-actions">
-            <button type="button" class="btn btn-ghost" data-close-profile>Cancelar</button>
-            <button type="submit" class="btn btn-primary">Salvar perfil</button>
-          </div>
-        </form>
-
-        <section class="security-section" aria-labelledby="security-title">
-          <div class="security-head">
-            <h3 id="security-title">Segurança e Recuperação</h3>
-            <span class="security-meta" id="security-meta">Chave ativa: —</span>
-          </div>
-
-          <form id="password-form" class="form-stack" novalidate>
-            <p class="form-hint">Trocar a senha mestra não altera os prontuários nem invalida o arquivo-chave atual.</p>
+        <section id="profile-panel-profile" class="profile-tab-panel" role="tabpanel" aria-labelledby="profile-tab-profile">
+          <form id="profile-form" class="form-stack" novalidate>
+            <p class="form-hint">Estes dados aparecem no cabeçalho e na assinatura dos laudos em PDF.</p>
             <div class="field">
-              <span>Senha mestra atual</span>
-              <input id="password-current" type="password" autocomplete="current-password" />
+              <span>Nome do profissional</span>
+              <input id="profile-name" type="text" maxlength="120" placeholder="ex.: Dra. Maria Silva" />
+              <small>Nome completo do responsável técnico.</small>
             </div>
             <div class="field">
-              <span>Nova senha mestra</span>
-              <input id="password-new" type="password" minlength="6" placeholder="Mínimo 6 caracteres" autocomplete="new-password" />
+              <span>Registro profissional</span>
+              <input id="profile-registry" type="text" maxlength="80" placeholder="ex.: CREFITO-6 123456-F ou CRM-CE 12345" />
+              <small>Conselho, número e UF.</small>
             </div>
             <div class="field">
-              <span>Confirmar nova senha</span>
-              <input id="password-confirm" type="password" minlength="6" placeholder="Repita a nova senha" autocomplete="new-password" />
+              <span>Instituição (opcional)</span>
+              <input id="profile-institution" type="text" maxlength="120" placeholder="ex.: Clínica / Universidade" />
             </div>
-            <p id="password-error" class="form-hint is-error" hidden></p>
+            <p id="profile-error" class="form-hint is-error" hidden></p>
             <div class="form-actions">
-              <button type="submit" class="btn btn-soft">Alterar senha mestra</button>
+              <button type="button" class="btn btn-ghost" data-close-profile>Cancelar</button>
+              <button type="submit" class="btn btn-primary">Salvar perfil</button>
             </div>
           </form>
+        </section>
 
-          <div class="security-block">
-            <strong>Arquivo-chave (.dmkey)</strong>
-            <p class="form-hint">Gere um novo arquivo se perdeu o anterior. A chave anterior deixa de funcionar.</p>
-            <div class="field">
-              <span>Senha mestra</span>
-              <input id="recovery-password" type="password" autocomplete="current-password" />
+        <section id="profile-panel-security" class="profile-tab-panel" role="tabpanel" aria-labelledby="profile-tab-security" hidden>
+          <div class="security-section" aria-labelledby="security-title">
+            <div class="security-head">
+              <h3 id="security-title">Segurança e Chave</h3>
+              <span class="security-meta" id="security-meta">Chave ativa: —</span>
             </div>
-            <p id="recovery-error" class="form-hint is-error" hidden></p>
-            <div class="form-actions">
-              <button type="button" class="btn btn-primary" id="regenerate-key">Gerar / Baixar novo .dmkey</button>
+
+            <div class="security-block">
+              <strong>Alterar Senha Mestra</strong>
+              <form id="password-form" class="form-stack" novalidate>
+                <p class="form-hint">Trocar a senha mestra não altera os prontuários nem invalida o arquivo-chave atual.</p>
+                <div class="field">
+                  <span>Senha mestra atual</span>
+                  <input id="password-current" type="password" autocomplete="current-password" />
+                </div>
+                <div class="field">
+                  <span>Nova senha mestra</span>
+                  <input id="password-new" type="password" minlength="6" placeholder="Mínimo 6 caracteres" autocomplete="new-password" />
+                </div>
+                <div class="field">
+                  <span>Confirmar nova senha</span>
+                  <input id="password-confirm" type="password" minlength="6" placeholder="Repita a nova senha" autocomplete="new-password" />
+                </div>
+                <p id="password-error" class="form-hint is-error" hidden></p>
+                <div class="form-actions">
+                  <button type="submit" class="btn btn-soft">Alterar senha mestra</button>
+                </div>
+              </form>
             </div>
-            <div id="recovery-result" class="recovery-result" hidden>
-              <span class="keyfile-label">Nova chave — guarde agora</span>
-              <code id="recovery-result-code"></code>
+
+            <div class="security-block">
+              <strong>Arquivo-chave de Recuperação (.dmkey)</strong>
+              <p class="form-hint">Gere um novo arquivo se perdeu o anterior. A chave anterior deixa de funcionar.</p>
+              <div class="field">
+                <span>Senha mestra</span>
+                <input id="recovery-password" type="password" autocomplete="current-password" />
+              </div>
+              <p id="recovery-error" class="form-hint is-error" hidden></p>
+              <div class="form-actions">
+                <button type="button" class="btn btn-primary" id="regenerate-key">Gerar / Baixar novo .dmkey</button>
+              </div>
+              <div id="recovery-result" class="recovery-result" hidden>
+                <span class="keyfile-label">Nova chave — guarde agora</span>
+                <code id="recovery-result-code"></code>
+              </div>
             </div>
           </div>
         </section>
 
-        <section class="security-section backup-section" aria-labelledby="backup-title">
-          <div class="security-head">
-            <h3 id="backup-title">Backup e Restauração (.dmbak)</h3>
-            <span class="security-meta">AES-256 · PBKDF2 · HMAC-SHA256</span>
-          </div>
-
-          <div class="security-block">
-            <strong>Exportar backup completo</strong>
-            <p class="form-hint">Gera um arquivo <span class="mono">.dmbak</span> cifrado com todos os prontuários, imagens, medições e escalas clínicas.</p>
-            <div class="field">
-              <span>Senha mestra</span>
-              <input id="backup-export-password" type="password" autocomplete="current-password" placeholder="Confirme a senha mestra" />
+        <section id="profile-panel-backup" class="profile-tab-panel" role="tabpanel" aria-labelledby="profile-tab-backup" hidden>
+          <div id="backup-progress" class="backup-progress" hidden aria-live="polite">
+            <div class="backup-progress-head">
+              <span id="backup-progress-step">Preparando restauração…</span>
+              <span id="backup-progress-percent">0%</span>
             </div>
-            <p id="backup-export-error" class="form-hint is-error" hidden></p>
+            <div class="backup-progress-track">
+              <div id="backup-progress-bar" class="backup-progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
+            </div>
+            <div id="backup-log" class="backup-log" aria-live="polite" aria-label="Registro detalhado da restauração"></div>
             <div class="form-actions">
-              <button type="button" class="btn btn-primary" id="backup-export-full">Exportar Backup Completo (.dmbak)</button>
+              <button type="button" class="btn btn-primary" id="backup-finish" hidden>Concluir e Ver Pacientes</button>
             </div>
           </div>
 
-          <div class="security-block">
-            <strong>Restaurar arquivo</strong>
-            <p class="form-hint">Inspecione o conteúdo antes de importar. Um snapshot <span class="mono">pre_restore_*.dmbak</span> é criado automaticamente antes de qualquer gravação.</p>
-            <label class="backup-file-input" for="backup-file">
-              <span>Selecionar arquivo .dmbak</span>
-              <input id="backup-file" type="file" accept=".dmbak,application/vnd.dermametric.backup" />
-            </label>
-            <div class="field">
-              <span>Senha mestra do arquivo</span>
-              <input id="backup-restore-password" type="password" autocomplete="off" placeholder="Senha usada na exportação" />
+          <div class="security-section backup-section" aria-labelledby="backup-title">
+            <div class="security-head">
+              <h3 id="backup-title">Backup da Estação</h3>
+              <span class="security-meta">AES-256 · PBKDF2 · HMAC-SHA256</span>
             </div>
-            <p id="backup-restore-error" class="form-hint is-error" hidden></p>
-            <div class="form-actions">
-              <button type="button" class="btn btn-soft" id="backup-inspect">Inspecionar arquivo</button>
+
+            <div class="security-block">
+              <strong>Exportar Backup Completo (.dmbak)</strong>
+              <p class="form-hint">Inclui todos os prontuários, imagens, medições e escalas clínicas da estação.</p>
+              <div class="field">
+                <span>Senha mestra</span>
+                <input id="backup-export-password" type="password" autocomplete="current-password" placeholder="Confirme a senha mestra" />
+              </div>
+              <p id="backup-export-error" class="form-hint is-error" hidden></p>
+              <div class="form-actions">
+                <button type="button" class="btn btn-primary" id="backup-export-full">Exportar Backup Completo (.dmbak)</button>
+              </div>
             </div>
-            <div id="backup-preview" class="backup-preview" hidden></div>
+
+            <div class="security-block">
+              <strong>Restaurar Backup Completo (.dmbak)</strong>
+              <p class="form-hint">Inspecione o conteúdo antes de importar. Um snapshot <span class="mono">pre_restore_*.dmbak</span> é criado automaticamente antes de qualquer gravação.</p>
+              <div class="backup-file-box" id="backup-file-drop">
+                <label class="backup-file-label" for="backup-file">Arquivo de backup (.dmbak)</label>
+                <input id="backup-file" class="backup-file-native" type="file" accept=".dmbak,application/vnd.dermametric.backup" />
+                <div id="backup-file-status" class="backup-file-status">Nenhum arquivo selecionado. Clique acima para escolher ou arraste o .dmbak aqui.</div>
+              </div>
+              <div class="field">
+                <span>Senha mestra</span>
+                <input id="backup-restore-password" type="password" autocomplete="off" placeholder="Senha usada na exportação do arquivo" />
+              </div>
+              <p id="backup-restore-error" class="form-hint is-error" hidden></p>
+              <div class="form-actions">
+                <button type="button" class="btn btn-soft" id="backup-inspect">Inspecionar arquivo</button>
+              </div>
+              <div id="backup-preview" class="backup-preview" hidden></div>
+            </div>
           </div>
         </section>
       </div>
@@ -678,8 +707,12 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
         </button>
       </header>
+      <div class="profile-tabs segmented grow" role="tablist" aria-label="Cadastrar ou importar paciente">
+        <button type="button" role="tab" id="patient-tab-manual" data-patient-tab="manual" class="is-active" aria-selected="true" aria-controls="patient-form">Cadastrar Manualmente</button>
+        <button type="button" role="tab" id="patient-tab-import" data-patient-tab="import" aria-selected="false" aria-controls="patient-panel-import" tabindex="-1">Importar Caso (.dmbak)</button>
+      </div>
       <div class="modal-body">
-        <form id="patient-form" class="form-stack" novalidate>
+        <form id="patient-form" class="form-stack profile-tab-panel" role="tabpanel" aria-labelledby="patient-tab-manual" data-patient-panel="manual">
           <div class="patient-code-hint info-banner">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2" /><path d="M9 20h6" /><path d="M12 3v17" /></svg>
             <span>Código único <strong id="patient-code-preview">PAC-XXXXXX</strong> gerado automaticamente. Não é sequencial e não expõe a ordem de cadastro.</span>
@@ -709,6 +742,51 @@
             <button type="submit" class="btn btn-primary">Criar paciente</button>
           </div>
         </form>
+
+        <section id="patient-panel-import" class="profile-tab-panel case-import" role="tabpanel" aria-labelledby="patient-tab-import" hidden>
+          <p class="form-hint">Receba um caso de outro profissional. O arquivo <span class="mono">.dmbak</span> é validado antes de qualquer gravação e nunca sobrescreve prontuários locais.</p>
+          <div class="backup-file-box" id="case-import-drop">
+            <label class="backup-file-label" for="case-import-file">Arquivo do caso (.dmbak)</label>
+            <input id="case-import-file" class="backup-file-native" type="file" accept=".dmbak,application/vnd.dermametric.backup" />
+            <div id="case-import-file-status" class="backup-file-status">Nenhum arquivo selecionado. Clique acima para escolher ou arraste o .dmbak aqui.</div>
+          </div>
+          <div class="field">
+            <span>Senha do arquivo (.dmbak)</span>
+            <input id="case-import-password" type="password" autocomplete="off" placeholder="Senha do caso (mestra ou definida na exportação)" />
+          </div>
+          <p id="case-import-error" class="form-hint is-error" hidden></p>
+          <div class="form-actions">
+            <button type="button" class="btn btn-soft" id="case-import-validate">Validar Caso</button>
+          </div>
+
+          <div id="case-import-preview" class="backup-preview case-import-preview" hidden></div>
+
+          <div id="case-import-conflict" class="case-import-conflict" hidden>
+            <strong>Este código já existe nesta estação</strong>
+            <label class="case-radio">
+              <input type="radio" name="case-import-strategy" value="new" checked />
+              <span>Importar como novo prontuário (novo código PAC-)</span>
+            </label>
+            <label class="case-radio">
+              <input type="radio" name="case-import-strategy" value="merge" />
+              <span>Mesclar sessões no prontuário existente</span>
+            </label>
+          </div>
+
+          <div id="case-import-progress" class="case-import-progress" hidden aria-live="polite">
+            <div class="case-import-progress-head">
+              <span id="case-import-status">Preparando importação…</span>
+              <span id="case-import-percent">0%</span>
+            </div>
+            <div class="case-import-track">
+              <div id="case-import-bar" class="case-import-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
+            </div>
+          </div>
+
+          <div class="form-actions">
+            <button type="button" class="btn btn-primary" id="case-import-submit" hidden>Importar Caso para a Estação</button>
+          </div>
+        </section>
       </div>
     </div>
   </div>
@@ -844,7 +922,11 @@
   </div>
 
   <div class="app-shell" hidden>
-    <aside class="sidebar" aria-label="Sessões e escalas clínicas">
+    <aside id="workspace-sidebar" class="sidebar" aria-label="Sessões e escalas clínicas">
+      <button type="button" id="rail-collapse-left" class="rail-collapse rail-collapse-left" aria-controls="workspace-sidebar" aria-expanded="true" title="Recolher barra lateral esquerda" aria-label="Recolher barra lateral esquerda">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6" /><path d="m20 18-6-6 6-6" /></svg>
+        <span class="rail-collapse-label">Recolher</span>
+      </button>
       <section class="panel session-panel">
         <div class="panel-head">
           <h2>Sessões do paciente</h2>
@@ -875,24 +957,24 @@
           <span id="workspace-patient" class="workspace-patient" hidden></span>
           <span class="eyebrow" id="step-kicker">Passo 1 de 4</span>
           <h2 id="step-title">Upload do par fotográfico</h2>
-          <p id="step-hint">Envie a foto com régua e a foto limpa da sessão selecionada.</p>
+          <p id="step-hint" class="step-hint-inline" title="Envie a foto com régua e a foto limpa da sessão selecionada.">Foto com régua e foto limpa</p>
         </div>
-        <div class="topbar-buttons" style="display:flex;gap:8px;align-items:center;">
-          <button id="patients-back" class="btn btn-ghost btn-sm" style="min-width:auto;" title="Voltar ao diretório de pacientes" aria-label="Voltar ao diretório de pacientes">
+        <div class="topbar-buttons">
+          <button id="patients-back" class="btn btn-ghost btn-sm" title="Voltar ao diretório de pacientes" aria-label="Voltar ao diretório de pacientes">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
-            ← Pacientes
+            <span>Pacientes</span>
           </button>
-          <button id="finish-patient" class="btn btn-primary btn-sm" style="min-width:auto;" title="Finalizar e proteger prontuário" aria-label="Finalizar e proteger prontuário">
+          <button id="finish-patient" class="btn btn-primary btn-sm" title="Finalizar e proteger prontuário" aria-label="Finalizar e proteger prontuário">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M8 12l4-4 4,4" /></svg>
-            Finalizar e Proteger
+            <span>Finalizar</span>
           </button>
-          <button id="personal-open" class="btn btn-ghost btn-sm" type="button" style="min-width:auto;" title="Ver e editar dados pessoais (senha mestra)" aria-label="Ver e editar dados pessoais do paciente">
+          <button id="personal-open" class="btn btn-ghost btn-sm" type="button" title="Ver e editar dados pessoais (senha mestra)" aria-label="Ver e editar dados pessoais do paciente">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></svg>
-            Dados pessoais
+            <span>Dados</span>
           </button>
-          <button id="patient-export-backup" class="btn btn-ghost btn-sm" type="button" style="min-width:auto;" title="Exportar este caso em arquivo .dmbak cifrado" aria-label="Exportar caso do paciente em backup .dmbak">
+          <button id="patient-export-backup" class="btn btn-ghost btn-sm" type="button" title="Exportar este caso em arquivo .dmbak cifrado" aria-label="Exportar caso do paciente em backup .dmbak">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="m7 10 5 5 5-5" /><path d="M12 15V3" /></svg>
-            Exportar Caso (.dmbak)
+            <span>Exportar .dmbak</span>
           </button>
         </div>
         <div class="viewport-tools" role="toolbar" aria-label="Ferramentas de visualização">
@@ -909,6 +991,11 @@
           <span class="toolbar-sep" aria-hidden="true"></span>
           <button id="loupe-toggle" class="icon-btn is-active" type="button" title="Lupa de precisão 4×" aria-label="Lupa de precisão 4×" aria-pressed="true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /><path d="M8 11h6M11 8v6" /></svg>
+          </button>
+          <span class="toolbar-sep" aria-hidden="true"></span>
+          <button id="canvas-focus" class="btn btn-ghost btn-sm canvas-focus-btn" type="button" title="Foco no Canvas: recolhe as duas barras laterais" aria-label="Foco no Canvas" aria-pressed="false" aria-controls="workspace-sidebar workspace-inspector">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3" /><path d="M16 3h3a2 2 0 0 1 2 2v3" /><path d="M21 16v3a2 2 0 0 1-2 2h-3" /><path d="M3 16v3a2 2 0 0 0 2 2h3" /></svg>
+            <span>Foco no Canvas</span>
           </button>
         </div>
       </div>
@@ -929,7 +1016,11 @@
       </div>
     </main>
 
-    <aside class="inspector" aria-label="Inspetor de etapas e resultados">
+    <aside id="workspace-inspector" class="inspector" aria-label="Inspetor de etapas e resultados">
+      <button type="button" id="rail-collapse-right" class="rail-collapse rail-collapse-right" aria-controls="workspace-inspector" aria-expanded="true" title="Recolher barra lateral direita" aria-label="Recolher barra lateral direita">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6" /><path d="m4 18 6-6-6-6" /></svg>
+        <span class="rail-collapse-label">Recolher</span>
+      </button>
       <nav id="steps-nav" class="steps-nav" aria-label="Etapas do fluxo"></nav>
       <div id="step-panel" class="step-panel"></div>
       <section class="panel results-panel">
@@ -1018,7 +1109,60 @@
     </div>
   </div>
 
+  <!-- Modal seguro para exportar caso individual (.dmbak) -->
+  <div id="export-case-modal" class="modal" hidden aria-hidden="true">
+    <div class="modal-backdrop" data-close-export-case></div>
+    <div class="modal-window form-modal" role="dialog" aria-modal="true" aria-labelledby="export-case-title">
+      <header class="modal-head">
+        <div>
+          <span class="eyebrow">Criptografia AES-256 · PBKDF2</span>
+          <h2 id="export-case-title">Exportar Caso (.dmbak)</h2>
+        </div>
+        <button class="icon-btn" type="button" data-close-export-case title="Fechar" aria-label="Fechar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
+        </button>
+      </header>
+      <div class="modal-body">
+        <form id="export-case-form" class="form-stack" novalidate>
+          <p class="form-hint" id="export-case-desc">Informe a senha mestra da estação para cifrar o pacote do prontuário.</p>
+          <div class="field">
+            <span>Senha mestra da estação</span>
+            <input id="export-case-password" type="password" autocomplete="current-password" placeholder="Digite a senha mestra" />
+          </div>
+          <label class="case-check" for="export-case-custom-password">
+            <input id="export-case-custom-password" type="checkbox" />
+            <span>Definir uma senha específica para abrir este arquivo (.dmbak)</span>
+          </label>
+          <div class="field" id="export-case-file-password-field" hidden>
+            <span>Senha do arquivo do caso</span>
+            <div class="case-password-row">
+              <input id="export-case-file-password" type="password" autocomplete="new-password" placeholder="Mínimo 6 caracteres" />
+              <button type="button" class="icon-btn case-password-toggle" id="export-case-file-password-toggle" title="Mostrar senha" aria-label="Mostrar senha" aria-pressed="false">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>
+              </button>
+            </div>
+            <small>Ideal para enviar o caso a outro profissional sem revelar a senha mestra da clínica. Quem receber precisará desta senha para abrir o arquivo.</small>
+          </div>
+          <p id="export-case-error" class="form-hint is-error" hidden></p>
+          <div class="form-actions">
+            <button type="button" class="btn btn-ghost" data-close-export-case>Cancelar</button>
+            <button type="submit" class="btn btn-primary" id="export-case-submit">Exportar Caso (.dmbak)</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
   <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+  <!-- Fail-safe fora do modal: se o cartão do perfil falhar em repintar após
+       uma restauração, o resumo e o botão Fechar continuam acessíveis aqui. -->
+  <div id="restore-banner" class="restore-banner" role="status" aria-live="assertive" hidden>
+    <div class="restore-banner-text">
+      <strong id="restore-banner-title">Backup restaurado</strong>
+      <span id="restore-banner-detail"></span>
+    </div>
+    <button type="button" class="btn btn-soft btn-sm" id="restore-banner-close">Fechar</button>
+  </div>
   <script src="/static/app.js"></script>
 </body>
 </html>
