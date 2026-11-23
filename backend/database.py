@@ -995,6 +995,70 @@ def delete_patient_session(patient_id: str, session_id: str) -> dict[str, Any]:
     return patient
 
 
+def delete_patient(patient_id: str) -> dict[str, Any] | None:
+    """Exclui permanentemente um prontuário, suas sessões, medições e arquivos."""
+    image_fields = (
+        "clean_image_path",
+        "ruler_image_path",
+        "aligned_image_path",
+        "enhanced_image_path",
+    )
+    candidate_paths: set[str] = set()
+    still_referenced: set[str] = set()
+
+    with connection() as conn:
+        patient_row = conn.execute(
+            "SELECT id, code FROM patients WHERE id = ?",
+            (patient_id,),
+        ).fetchone()
+        if patient_row is None:
+            return None
+        summary = {
+            "id": str(patient_row["id"]),
+            "code": str(patient_row["code"]),
+        }
+        session_rows = conn.execute(
+            "SELECT * FROM sessions WHERE patient_id = ?",
+            (patient_id,),
+        ).fetchall()
+        session_ids = [str(r["id"]) for r in session_rows]
+        for srow in session_rows:
+            for field in image_fields:
+                val = srow[field]
+                if val:
+                    candidate_paths.add(str(val))
+
+        for sid in session_ids:
+            conn.execute("DELETE FROM striae_measurements WHERE session_id = ?", (sid,))
+            conn.execute("DELETE FROM stria_roi WHERE session_id = ?", (sid,))
+        conn.execute("DELETE FROM sessions WHERE patient_id = ?", (patient_id,))
+        conn.execute("DELETE FROM patient_pins WHERE patient_id = ?", (patient_id,))
+        conn.execute("DELETE FROM patients WHERE id = ?", (patient_id,))
+
+        if candidate_paths:
+            remaining = conn.execute(
+                "SELECT clean_image_path, ruler_image_path, aligned_image_path, enhanced_image_path FROM sessions"
+            ).fetchall()
+            for r in remaining:
+                for field in image_fields:
+                    val = r[field]
+                    if val:
+                        still_referenced.add(str(val))
+
+    removed_files = 0
+    for rel in candidate_paths - still_referenced:
+        abs_path = storage_absolute(rel)
+        if abs_path is not None:
+            try:
+                if abs_path.is_file():
+                    abs_path.unlink()
+                    removed_files += 1
+            except OSError:
+                pass
+    summary["removed_files"] = removed_files
+    return summary
+
+
 def verify_patient_pin(patient_id: str, pin: str) -> bool:
     """Verifica se o PIN fornecido corresponde ao paciente."""
     with connection() as conn:

@@ -56,6 +56,7 @@ jobs:
             VERSION="0.0.${{ github.run_number }}"
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          sed -i "s/^APP_VERSION = \".*\"/APP_VERSION = \"${VERSION}\"/" backend/version.py
           echo "Versão: ${VERSION}"
 
       - name: Gerar AppImage e pacote tar.gz Linux

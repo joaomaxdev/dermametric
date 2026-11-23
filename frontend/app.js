@@ -114,6 +114,8 @@ const state = {
   rails: { left: false, right: false },
   canvasFocus: false,
   busy: false,
+  update: { info: null, status: null, timer: null, busy: false },
+  deletePatient: { id: null, code: "", name: "" },
 };
 
 const view = { zoom: 1, ox: 0, oy: 0, autoFit: true };
@@ -1329,6 +1331,9 @@ function renderPatients() {
             ${!locked && state.patientSigil ? '<span class="patient-sigil" title="Modo sigilo ativo" aria-label="Modo sigilo ativo">sigilo</span>' : ""}
             <button type="button" class="patient-personal" data-personal-id="${esc(patient.id)}" title="Ver / editar dados pessoais (senha mestra)" aria-label="Dados pessoais de ${esc(patient.code || "paciente")}">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="3.4" /><path d="M17.5 3.5 19 5l-2.6 2.6L15 6.1z" /></svg>
+            </button>
+            <button type="button" class="patient-personal patient-delete" data-delete-patient-id="${esc(patient.id)}" title="Excluir prontuário (senha mestra)" aria-label="Excluir prontuário ${esc(patient.code || "paciente")}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18" /><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M10 11v6M14 11v6" /></svg>
             </button>
           </span>
           <span class="patient-identity ${masked ? "is-masked" : ""}" title="${masked ? "Identidade protegida pelo modo sigilo" : esc(identity)}">${esc(identity)}</span>
@@ -4503,6 +4508,13 @@ function onDocumentClick(event) {
     removeSession(removeTarget.dataset.removeSession);
     return;
   }
+  const deleteTarget = event.target.closest("[data-delete-patient-id]");
+  if (deleteTarget) {
+    event.preventDefault();
+    event.stopPropagation();
+    openDeletePatientModal(deleteTarget.dataset.deletePatientId);
+    return;
+  }
   const personalTarget = event.target.closest("[data-personal-id]");
   if (personalTarget) {
     event.preventDefault();
@@ -5493,6 +5505,7 @@ async function checkHealth() {
   try {
     const health = await api("/api/health");
     state.health = health;
+    setAppVersion(health?.version);
     if (badge) {
       badge.classList.remove("is-pending", "is-offline");
       badge.classList.add("is-online");
@@ -5504,6 +5517,314 @@ async function checkHealth() {
       badge.classList.add("is-offline");
     }
     if (text) text.textContent = "Sistema offline";
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Atualizações do DermaMetric (GitHub Releases)
+   -------------------------------------------------------------------------- */
+const UPDATE_STATUS_LABELS = {
+  idle: "Pronto para verificar atualizações.",
+  checking: "Verificando atualizações…",
+  downloading: "Baixando atualização…",
+  installing: "Instalando atualização…",
+  restarting: "Reiniciando o DermaMetric…",
+  error: "Falha na atualização.",
+};
+
+function normalizeVersionLabel(value) {
+  const clean = String(value || "").trim().replace(/^v/i, "");
+  return clean ? `v${clean}` : "—";
+}
+
+function setAppVersion(version) {
+  const clean = String(version || "").trim().replace(/^v/i, "");
+  const label = $("app-version");
+  if (label) label.textContent = clean ? `v${clean}` : "v—";
+  const current = $("update-current-version");
+  if (current && clean) current.textContent = `v${clean}`;
+}
+
+function openUpdateModal() {
+  const modal = $("update-modal");
+  if (!modal) return;
+  modal.hidden = false;
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("has-modal");
+  const shell = modal.querySelector(".update-modal") || modal.querySelector(".modal-window");
+  setTimeout(() => shell?.focus({ preventScroll: true }), 40);
+  checkForUpdates();
+}
+
+function closeUpdateModal() {
+  const modal = $("update-modal");
+  if (!modal || modal.hidden) return;
+  modal.hidden = true;
+  modal.setAttribute("aria-hidden", "true");
+  stopUpdatePolling();
+  const otherOpen = [
+    "profile-modal", "patient-modal", "pin-modal", "lock-patient-modal",
+    "compare-modal", "personal-data-modal", "delete-patient-modal", "help-modal",
+  ].some((id) => {
+    const node = $(id);
+    return node && !node.hidden;
+  });
+  if (state.screen !== "lock" && !otherOpen) document.body.classList.remove("has-modal");
+}
+
+function showUpdateLink(force = false) {
+  const link = $("update-link");
+  if (!link) return;
+  const info = state.update.info;
+  if (info?.html_url) link.href = info.html_url;
+  link.hidden = !force && !(info?.update_available && !info?.can_auto_update);
+}
+
+async function checkForUpdates() {
+  if (state.update.busy) return;
+  state.update.busy = true;
+  const button = $("update-check");
+  if (button) button.disabled = true;
+  setLockError("update-error", "");
+  const summary = $("update-summary");
+  if (summary) {
+    summary.hidden = false;
+    summary.textContent = "Consultando o GitHub Releases…";
+  }
+  try {
+    const info = await api("/api/system/update/check");
+    state.update.info = info || null;
+    renderUpdateInfo(info || {});
+  } catch (error) {
+    if (summary) {
+      summary.hidden = false;
+      summary.textContent = "Não foi possível verificar atualizações agora.";
+    }
+    setLockError("update-error", error.message || "Falha ao consultar atualizações.");
+    showUpdateLink(true);
+  } finally {
+    state.update.busy = false;
+    if (button) button.disabled = false;
+  }
+}
+
+function renderUpdateInfo(info) {
+  const current = normalizeVersionLabel(info.current_version || state.health?.version);
+  const latest = info.latest_version ? normalizeVersionLabel(info.latest_version) : "—";
+  const currentNode = $("update-current-version");
+  const latestNode = $("update-latest-version");
+  if (currentNode) currentNode.textContent = current;
+  if (latestNode) latestNode.textContent = latest;
+
+  const summary = $("update-summary");
+  if (summary) {
+    summary.hidden = false;
+    if (info.update_available) {
+      summary.textContent = `Nova versão ${latest} disponível. Instalada: ${current}.`;
+    } else if (latest !== "—") {
+      summary.textContent = `Você está na versão mais recente (${current}).`;
+    } else {
+      summary.textContent = "Nenhuma release publicada foi encontrada.";
+    }
+  }
+
+  const notesWrap = $("update-notes-wrap");
+  const notes = $("update-notes");
+  const notesVersion = $("update-notes-version");
+  const releaseNotes = String(info.release_notes || "").trim();
+  if (notesWrap) notesWrap.hidden = !releaseNotes;
+  if (notes) notes.textContent = releaseNotes;
+  if (notesVersion) notesVersion.textContent = releaseNotes ? latest : "";
+
+  const apply = $("update-apply");
+  const canAuto = Boolean(info.update_available && info.can_auto_update);
+  if (apply) {
+    apply.hidden = !canAuto;
+    apply.disabled = false;
+    apply.textContent = "Atualizar agora";
+  }
+  setLockError("update-error", "");
+  showUpdateLink();
+  if (!canAuto) {
+    const progress = $("update-progress");
+    if (progress) progress.hidden = true;
+    const statusMessage = $("update-status-message");
+    if (statusMessage) statusMessage.hidden = true;
+  }
+}
+
+function renderUpdateStatus(status) {
+  if (!status || typeof status !== "object") return;
+  state.update.status = status;
+  const kind = String(status.status || "idle");
+  const progress = Math.max(0, Math.min(100, Math.round(Number(status.progress) || 0)));
+  const running = ["downloading", "installing", "restarting"].includes(kind);
+  const downloaded = Number(status.downloaded_bytes) || 0;
+  const total = Number(status.total_bytes) || 0;
+
+  const wrap = $("update-progress");
+  if (wrap) wrap.hidden = !(running || progress > 0 || kind === "error");
+  const bar = $("update-progress-bar");
+  if (bar) bar.style.width = `${progress}%`;
+  const track = $("update-progress-track");
+  if (track) track.setAttribute("aria-valuenow", String(progress));
+  const label = $("update-progress-label");
+  if (label) label.textContent = `${progress}%`;
+  const bytes = $("update-progress-bytes");
+  if (bytes) {
+    bytes.textContent = total > 0
+      ? `${bytesLabel(downloaded)} de ${bytesLabel(total)}`
+      : downloaded > 0 ? bytesLabel(downloaded) : "";
+  }
+
+  const message = String(status.message || UPDATE_STATUS_LABELS[kind] || "").trim();
+  const messageNode = $("update-status-message");
+  if (messageNode) {
+    messageNode.hidden = !message;
+    messageNode.textContent = message;
+  }
+
+  if (kind === "error") {
+    setLockError("update-error", status.error || status.message || "Falha ao aplicar a atualização.");
+    showUpdateLink(true);
+  } else if (running) {
+    setLockError("update-error", "");
+  }
+
+  const apply = $("update-apply");
+  if (apply) {
+    if (running) apply.hidden = true;
+    apply.disabled = running;
+  }
+}
+
+function stopUpdatePolling() {
+  if (state.update.timer) {
+    clearTimeout(state.update.timer);
+    state.update.timer = null;
+  }
+}
+
+function scheduleUpdatePoll() {
+  stopUpdatePolling();
+  state.update.timer = setTimeout(pollUpdateStatus, 1200);
+}
+
+async function pollUpdateStatus() {
+  state.update.timer = null;
+  try {
+    const status = await api("/api/system/update/status");
+    renderUpdateStatus(status);
+    if (["downloading", "installing"].includes(String(status?.status || ""))) {
+      scheduleUpdatePoll();
+    }
+  } catch (error) {
+    setLockError("update-error", `Não foi possível acompanhar a atualização: ${error.message}`);
+  }
+}
+
+async function applyUpdate() {
+  const button = $("update-apply");
+  if (button) button.disabled = true;
+  setLockError("update-error", "");
+  try {
+    const status = await postJSON("/api/system/update/apply", {});
+    renderUpdateStatus(status);
+    scheduleUpdatePoll();
+  } catch (error) {
+    setLockError("update-error", error.message || "Não foi possível iniciar a atualização.");
+    showUpdateLink(true);
+    if (button) button.disabled = false;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Exclusão de prontuário (protegida pela senha mestra)
+   -------------------------------------------------------------------------- */
+function openDeletePatientModal(patientId) {
+  const modal = $("delete-patient-modal");
+  if (!modal) return;
+  const patient = state.patients.find((item) => item.id === patientId)
+    || (state.patient?.id === patientId ? state.patient : null);
+  if (!patient) {
+    toast("Prontuário não encontrado para exclusão.", "error");
+    return;
+  }
+  state.deletePatient = {
+    id: patient.id,
+    code: patient.code || "—",
+    name: patientDirectoryName(patient) || "Paciente",
+  };
+  const code = $("delete-patient-code");
+  const name = $("delete-patient-name");
+  if (code) code.textContent = state.deletePatient.code;
+  if (name) name.textContent = state.deletePatient.name;
+  const password = $("delete-patient-password");
+  if (password) password.value = "";
+  setLockError("delete-patient-error", "");
+  modal.hidden = false;
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("has-modal");
+  setTimeout(() => password?.focus(), 40);
+}
+
+function closeDeletePatientModal() {
+  const modal = $("delete-patient-modal");
+  if (!modal) return;
+  modal.hidden = true;
+  modal.setAttribute("aria-hidden", "true");
+  state.deletePatient = { id: null, code: "", name: "" };
+  const password = $("delete-patient-password");
+  if (password) password.value = "";
+  setLockError("delete-patient-error", "");
+  const otherOpen = [
+    "profile-modal", "patient-modal", "pin-modal", "lock-patient-modal",
+    "compare-modal", "personal-data-modal", "delete-patient-modal", "help-modal", "update-modal",
+  ].some((id) => {
+    const node = $(id);
+    return node && !node.hidden;
+  });
+  if (state.screen !== "lock" && !otherOpen) document.body.classList.remove("has-modal");
+}
+
+async function confirmDeletePatient() {
+  const patientId = state.deletePatient.id;
+  if (!patientId) return;
+  const password = $("delete-patient-password")?.value || "";
+  if (!password) {
+    setLockError("delete-patient-error", "Informe a senha mestra para excluir este prontuário.");
+    $("delete-patient-password")?.focus();
+    return;
+  }
+  const button = $("delete-patient-confirm");
+  if (button) button.disabled = true;
+  setLockError("delete-patient-error", "");
+  setBusy(true, "Excluindo prontuário…");
+  const code = state.deletePatient.code;
+  try {
+    const result = await postJSON(
+      `/api/patients/${encodeURIComponent(patientId)}/delete`,
+      { password, master_password: password },
+    );
+    const removed = Number(result?.removed_files) || 0;
+    const wasActive = state.patient?.id === patientId;
+    delete state.patientPin[patientId];
+    closeDeletePatientModal();
+    if (wasActive) {
+      await showDirectory();
+    } else {
+      await loadPatients();
+    }
+    toast(
+      `Prontuário ${result?.code || code} excluído definitivamente · ${removed} imagem(ns) removida(s).`,
+      "success",
+      5600,
+    );
+  } catch (error) {
+    setLockError("delete-patient-error", error.message || "Não foi possível excluir o prontuário.");
+  } finally {
+    if (button) button.disabled = false;
+    setBusy(false);
   }
 }
 
@@ -5677,6 +5998,12 @@ function bindEvents() {
   $("help-open")?.addEventListener("click", () => openHelpModal());
   document.querySelectorAll("[data-close-help]").forEach((node) => {
     node.addEventListener("click", closeHelpModal);
+  });
+  $("update-open")?.addEventListener("click", openUpdateModal);
+  $("update-check")?.addEventListener("click", checkForUpdates);
+  $("update-apply")?.addEventListener("click", applyUpdate);
+  document.querySelectorAll("[data-close-update]").forEach((node) => {
+    node.addEventListener("click", closeUpdateModal);
   });
   $("help-search")?.addEventListener("input", filterHelp);
   document.querySelectorAll("[data-help-tab]").forEach((button) => {
@@ -6026,6 +6353,15 @@ function bindPatientEvents() {
   $("personal-birth")?.addEventListener("input", updatePersonalAge);
   document.querySelectorAll("[data-close-personal]").forEach((node) => {
     node.addEventListener("click", closePersonalDataModal);
+  });
+
+  // Exclusão de prontuário (senha mestra)
+  $("delete-patient-confirm")?.addEventListener("click", confirmDeletePatient);
+  $("delete-patient-password")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); confirmDeletePatient(); }
+  });
+  document.querySelectorAll("[data-close-delete-patient]").forEach((node) => {
+    node.addEventListener("click", closeDeletePatientModal);
   });
 
   // Acessibilidade do card (div role=button): Enter/Espaço abrem o prontuário.

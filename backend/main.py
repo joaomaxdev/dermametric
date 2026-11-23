@@ -30,8 +30,9 @@ from PIL import Image
 
 try:  # importação como pacote (uvicorn backend.main:app / pytest)
     from . import database as db
-    from . import paths, security, vision, auth, report
+    from . import paths, security, vision, auth, report, updater
     from . import backup as backup_mod
+    from .version import APP_VERSION
     from .models import (
         CalibrationRequest,
         ClinicalScalesRequest,
@@ -48,6 +49,8 @@ except ImportError:  # pragma: no cover - execução direta de dentro de backend
     import vision  # type: ignore[no-redef]
     import auth  # type: ignore[no-redef]
     import report  # type: ignore[no-redef]
+    import updater  # type: ignore[no-redef]
+    from version import APP_VERSION  # type: ignore[no-redef]
     import backup as backup_mod  # type: ignore[no-redef]
     from models import (  # type: ignore[no-redef]
         CalibrationRequest,
@@ -414,6 +417,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "service": "dermametric",
+        "version": APP_VERSION,
         "sessions": list(db.SESSION_IDS),
         "db": str(db.DB_PATH),
         "encryption": {
@@ -422,6 +426,33 @@ def health() -> dict[str, Any]:
             "key_fingerprint": security.key_fingerprint(),
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Atualizações (GitHub Releases)
+# ---------------------------------------------------------------------------
+@app.get("/api/system/update/check")
+def system_update_check() -> dict[str, Any]:
+    """Consulta a última release publicada e compara com a versão instalada."""
+    try:
+        return updater.check_for_updates()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/system/update/status")
+def system_update_status() -> dict[str, Any]:
+    """Estado atual do download/instalação da atualização em background."""
+    return updater.get_update_status()
+
+
+@app.post("/api/system/update/apply")
+def system_update_apply() -> dict[str, Any]:
+    """Inicia o download e a instalação da atualização disponível."""
+    try:
+        return updater.start_update()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/auth/status")
@@ -1007,6 +1038,24 @@ def delete_patient_session(patient_id: str, session_id: str) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return patient
+
+
+@app.post("/api/patients/{patient_id}/delete")
+def delete_patient(patient_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Exclui definitivamente o prontuário após confirmar a senha mestra.
+
+    Remove sessões, medições, ROIs, PIN e as imagens criptografadas que não
+    sejam compartilhadas com outros prontuários. A operação é irreversível.
+    """
+    password = str(
+        payload.get("master_password") or payload.get("password") or ""
+    )
+    if not password or not auth.verify_access(password):
+        raise HTTPException(status_code=401, detail="Senha mestra incorreta.")
+    summary = db.delete_patient(patient_id)
+    if summary is None:
+        raise HTTPException(status_code=404, detail="Paciente não encontrado")
+    return {"deleted": True, **summary}
 
 
 @app.post("/api/patients/{patient_id}/unlock")

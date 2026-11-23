@@ -43,6 +43,7 @@ jobs:
             $version = "0.0.${{ github.run_number }}"
           }
           "version=$version" >> $env:GITHUB_OUTPUT
+          (Get-Content "backend/version.py") -replace 'APP_VERSION = ".*"', "APP_VERSION = `"$version`"" | Set-Content "backend/version.py"
           Write-Host "Versão: $version"
 
       - name: Build PyInstaller (onedir/windowed)
