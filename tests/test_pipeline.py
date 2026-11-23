@@ -797,7 +797,10 @@ def test_encryption_at_rest(client):
     """Arquivos e campos sensíveis ficam cifrados no disco, mas legíveis na API."""
     key_file = Path(db.STORAGE_DIR) / ".secret.key"
     assert key_file.exists()
-    assert stat.S_IMODE(key_file.stat().st_mode) == 0o600
+    if os.name != "nt":
+        # O Windows só representa o bit somente-leitura via chmod; o modo POSIX
+        # 0o600 não é aplicável lá (a proteção real é a ACL do perfil do usuário).
+        assert stat.S_IMODE(key_file.stat().st_mode) == 0o600
 
     with sqlite3.connect(db.DB_PATH) as connection:
         connection.row_factory = sqlite3.Row
