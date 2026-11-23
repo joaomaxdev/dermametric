@@ -119,7 +119,7 @@ Se o projeto agrega valor à sua clínica, pesquisa ou prática profissional, co
 **Pix Copia e Cola (valor livre):**
 
 ```text
-00020126460014br.gov.bcb.pix0124marques-joao-e00@jim.com5204000053039865802BR5924JOAO MARQUES VIANA SILVA6009ITAPIPOCA62150511DERMAMETRIC6304147B
+00020126460014br.gov.bcb.pix0124marques-joao-e00@jim.com5204000053039865802BR5912JOAO MAX DEV6009ITAPIPOCA62150511DERMAMETRIC6304E1A4
 ```
 
 Você também pode apoiar gratuitamente:
