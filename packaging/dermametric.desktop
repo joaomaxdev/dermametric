@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=DermaMetric
+GenericName=Fotogrametria Clínica
+Comment=Estação clínica local de fotogrametria, morfometria cutânea e laudos longitudinais
+Exec=dermametric %U
+Icon=dermametric
+Terminal=false
+Categories=Science;MedicalSoftware;Education;
+Keywords=dermatologia;fotogrametria;morfometria;clinica;laudo;
+StartupNotify=true

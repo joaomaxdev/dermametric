@@ -1,0 +1,89 @@
+name: build-linux
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux-appimage:
+    name: DermaMetric-x86_64.AppImage
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Dependências do sistema (GTK/WebKit e FUSE para AppImage)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfuse2 \
+            libglib2.0-0 \
+            libgl1 \
+            libgtk-3-0 \
+            libwebkit2gtk-4.1-0 \
+            python3-gi \
+            gir1.2-gtk-3.0 \
+            gir1.2-webkit2-4.1 \
+            desktop-file-utils \
+            curl
+
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Dependências Python
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Definir versão
+        id: version
+        run: |
+          REF="${{ github.ref_name }}"
+          if [[ "$REF" =~ ^v([0-9]+\.[0-9]+\.[0-9]+.*)$ ]]; then
+            VERSION="${BASH_REMATCH[1]}"
+          else
+            VERSION="0.0.${{ github.run_number }}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Versão: ${VERSION}"
+
+      - name: Gerar AppImage e pacote tar.gz Linux
+        run: |
+          chmod +x packaging/build-linux.sh
+          ./packaging/build-linux.sh
+
+      - name: Smoke test do AppImage gerado
+        run: |
+          TMP_DATA="$(mktemp -d)"
+          APPIMAGE_EXTRACT_AND_RUN=1 ./dist/linux/DermaMetric-x86_64.AppImage --smoke-test --data-dir "$TMP_DATA"
+          rm -rf "$TMP_DATA"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DermaMetric-Linux-${{ steps.version.outputs.version }}
+          path: |
+            dist/linux/DermaMetric-x86_64.AppImage
+            dist/linux/DermaMetric-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+      - name: Publicar release (tags v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/linux/DermaMetric-x86_64.AppImage
+            dist/linux/DermaMetric-linux-x86_64.tar.gz
+          generate_release_notes: true
+          fail_on_unmatched_files: true

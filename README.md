@@ -19,6 +19,7 @@
 
   <p>
     <a href="#instalação-rápida-windows">Instalação Windows</a> •
+    <a href="#instalação-rápida-linux">Instalação Linux</a> •
     <a href="#recursos-clínicos">Recursos Clínicos</a> •
     <a href="#guia-rápido-da-clínica">Guia da Clínica</a> •
     <a href="#segurança-e-privacidade-lgpd">Segurança &amp; LGPD</a> •
@@ -34,7 +35,7 @@ O **DermaMetric** é uma estação clínica **100% local (*offline-first*)** de 
 
 Projetado para consultórios, clínicas e pesquisadores, o sistema combina **precisão metrológica** (calibração por régua milimetrada, alinhamento geométrico automático e análise colorimétrica clínica) com **privacidade total**: nenhum prontuário, foto ou dado do paciente é enviado para a nuvem.
 
-Funciona como **aplicativo desktop nativo de duplo clique** no Windows (ou localmente no Linux), sem necessidade de internet, assinaturas ou servidores externos.
+Funciona como **aplicativo desktop nativo de duplo clique** no Windows e no Linux (`AppImage` ou instalador automático), sem necessidade de internet, assinaturas ou servidores externos.
 
 ---
 
