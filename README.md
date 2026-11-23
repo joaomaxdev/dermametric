@@ -1,8 +1,33 @@
-# DermaMetric
+<div align="center">
+  <img src="frontend/favicon.svg" alt="DermaMetric Logo" width="96" height="96" />
 
-**Estação Clínica Local de Fotogrametria, Morfometria Cutânea e Laudos Longitudinais**
+  <h1>DermaMetric</h1>
+  <p>
+    <strong>Estação Clínica Local de Fotogrametria, Morfometria Cutânea e Laudos Longitudinais</strong>
+  </p>
 
-[Instalação Windows](#instalação-rápida-windows) • [Instalação Linux](#instalação-rápida-linux) • [Recursos Clínicos](#recursos-clínicos) • [Guia da Clínica](#guia-rápido-da-clínica) • [Arquitetura & Engenharia](#arquitetura-e-engenharia) • [Segurança & Privacidade](#segurança-e-privacidade-boas-práticas-lgpd) • [Apoie o Projeto](#apoie-o-projeto)
+  <p>
+    <a href="https://github.com/joaomaxdev/dermametric/releases/latest">
+      <img src="https://img.shields.io/github/v/release/joaomaxdev/dermametric?style=for-the-badge&color=123131&labelColor=0c2323&label=Release" alt="Release" />
+    </a>
+    <a href="https://github.com/joaomaxdev/dermametric/actions/workflows/build-windows.yml">
+      <img src="https://img.shields.io/github/actions/workflow/status/joaomaxdev/dermametric/build-windows.yml?style=for-the-badge&color=18c9a8&labelColor=0c2323&label=Windows%20Build" alt="Windows Build" />
+    </a>
+    <img src="https://img.shields.io/badge/LGPD-100%25%20Local%20%26%20Cifrado-123131?style=for-the-badge&labelColor=0c2323" alt="LGPD Local-First" />
+    <img src="https://img.shields.io/badge/Open%20Source-Gratuito-18c9a8?style=for-the-badge&labelColor=0c2323" alt="Open Source" />
+  </p>
+
+  <p>
+    <a href="#instalação-rápida-windows">Instalação Windows</a> •
+    <a href="#instalação-rápida-linux">Instalação Linux</a> •
+    <a href="#recursos-clínicos">Recursos Clínicos</a> •
+    <a href="#guia-rápido-da-clínica">Guia da Clínica</a> •
+    <a href="#arquitetura-e-engenharia">Arquitetura &amp; Engenharia</a> •
+    <a href="#segurança-e-privacidade-boas-práticas-lgpd">Segurança &amp; LGPD</a> •
+    <a href="#apoie-o-projeto">Apoie o Projeto</a>
+  </p>
+</div>
+
 
 ---
 
