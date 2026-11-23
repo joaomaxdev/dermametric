@@ -1,31 +1,8 @@
-<div align="center">
-  <img src="frontend/favicon.svg" alt="DermaMetric Logo" width="96" height="96" />
+# DermaMetric
 
-  <h1>DermaMetric</h1>
-  <p>
-    <strong>Estação Clínica Local de Fotogrametria, Morfometria Cutânea e Laudos Longitudinais</strong>
-  </p>
+**Estação Clínica Local de Fotogrametria, Morfometria Cutânea e Laudos Longitudinais**
 
-  <p>
-    <a href="https://github.com/joaomaxdev/dermametric/releases/latest">
-      <img src="https://img.shields.io/github/v/release/joaomaxdev/dermametric?style=for-the-badge&color=123131&labelColor=0c2323&label=Release" alt="Release" />
-    </a>
-    <a href="https://github.com/joaomaxdev/dermametric/actions/workflows/build-windows.yml">
-      <img src="https://img.shields.io/github/actions/workflow/status/joaomaxdev/dermametric/build-windows.yml?style=for-the-badge&color=18c9a8&labelColor=0c2323&label=Windows%20Build" alt="Windows Build" />
-    </a>
-    <img src="https://img.shields.io/badge/LGPD-100%25%20Local%20%26%20Cifrado-123131?style=for-the-badge&labelColor=0c2323" alt="LGPD Local-First" />
-    <img src="https://img.shields.io/badge/Open%20Source-Gratuito-18c9a8?style=for-the-badge&labelColor=0c2323" alt="Open Source" />
-  </p>
-
-  <p>
-    <a href="#instalação-rápida-windows">Instalação Windows</a> •
-    <a href="#instalação-rápida-linux">Instalação Linux</a> •
-    <a href="#recursos-clínicos">Recursos Clínicos</a> •
-    <a href="#guia-rápido-da-clínica">Guia da Clínica</a> •
-    <a href="#segurança-e-privacidade-lgpd">Segurança &amp; LGPD</a> •
-    <a href="#apoie-o-projeto">Apoie o Projeto</a>
-  </p>
-</div>
+[Instalação Windows](#instalação-rápida-windows) • [Instalação Linux](#instalação-rápida-linux) • [Recursos Clínicos](#recursos-clínicos) • [Guia da Clínica](#guia-rápido-da-clínica) • [Arquitetura & Engenharia](#arquitetura-e-engenharia) • [Segurança & Privacidade](#segurança-e-privacidade-boas-práticas-lgpd) • [Apoie o Projeto](#apoie-o-projeto)
 
 ---
 
@@ -36,6 +13,15 @@ O **DermaMetric** é uma estação clínica **100% local (*offline-first*)** de 
 Projetado para consultórios, clínicas e pesquisadores, o sistema combina **precisão metrológica** (calibração por régua milimetrada, alinhamento geométrico automático e análise colorimétrica clínica) com **privacidade total**: nenhum prontuário, foto ou dado do paciente é enviado para a nuvem.
 
 Funciona como **aplicativo desktop nativo de duplo clique** no Windows e no Linux (`AppImage` ou instalador automático), sem necessidade de internet, assinaturas ou servidores externos.
+
+> **Aviso Clínico e Regulatório:** O DermaMetric é uma **ferramenta de apoio ao registro, à documentação e à medição fotogramétrica/colorimétrica** conduzida por profissional habilitado. Ele **não substitui avaliação clínica ou médica presencial**, não emite diagnóstico médico autônomo e não deve ser utilizado de forma isolada para decisões terapêuticas.
+
+## Demonstração Visual (Dados Sintéticos)
+
+| Estação Clínica e Prontuários | Fotogrametria e Contraste CIELAB | Laudo Clínico em PDF |
+| :---: | :---: | :---: |
+| <img src="docs/screenshots/01-estacao-clinica.png" alt="Estação Clínica DermaMetric" width="280" /> | <img src="docs/screenshots/02-analise-morfometrica.png" alt="Análise Morfométrica e Colorimétrica Sintética" width="280" /> | <img src="docs/screenshots/03-laudo-clinico-pdf.png" alt="Laudo Clínico em PDF" width="280" /> |
+| *Interface local sem dependência de nuvem* | *Visualização ilustrativa com dados sintéticos* | *Relatório estruturado para impressão/arquivo* |
 
 ---
 
@@ -60,9 +46,16 @@ Funciona como **aplicativo desktop nativo de duplo clique** no Windows e no Linu
 
 ### Instalação Rápida (Windows)
 
-1. Acesse a página de [**Releases**](https://github.com/joaomaxdev/dermametric/releases/latest) e baixe o instalador **`DermaMetric-Setup.exe`**.
+1. Acesse a aba **Releases** do repositório e baixe o instalador **`DermaMetric-Setup.exe`**.
 2. Dê duplo clique e siga o assistente. **Não exige senha de administrador** nem instalação de programas adicionais.
 3. O instalador cria atalhos na **Área de Trabalho** e no **Menu Iniciar**.
+
+### Instalação Rápida (Linux)
+
+Escolha a forma mais prática para o seu computador (**não exige `sudo`**):
+
+- **Instalador automático:** baixe `packaging/install-linux.sh` e execute no terminal (`bash install-linux.sh` para instalar com atalhos no Menu e Área de Trabalho, ou `bash install-linux.sh --uninstall` para remover preservando `data/`).
+- **AppImage portátil:** baixe **`DermaMetric-x86_64.AppImage`** na seção de **Releases**, habilite a execução como programa (`chmod +x DermaMetric-x86_64.AppImage` ou via propriedades do arquivo) e abra com duplo clique.
 
 Todos os dados permanecem salvos apenas no computador da clínica:
 
@@ -95,13 +88,54 @@ Se a senha mestra for esquecida ou o sistema for instalado em um novo computador
 
 ---
 
-## Segurança e Privacidade (LGPD)
+## Arquitetura e Engenharia
 
-O DermaMetric foi projetado desde a base para atender às boas práticas de proteção de dados sensíveis de saúde (**LGPD**):
+### Stack Principal
 
-- **Operação 100% offline:** nenhum dado clínico ou imagem sai do computador local.
-- **Criptografia em repouso:** prontuários, anotações, medições e fotografias são armazenados de forma cifrada em disco, acessíveis somente após desbloqueio com a senha mestra.
-- **Backups protegidos:** todos os arquivos `.dmbak` são criptografados com a senha mestra da clínica.
+- **Backend & API:** Python, **FastAPI** e **Uvicorn**, com persistência local em **SQLite** (`backend/database.py`, `backend/main.py`, `backend/models.py`).
+- **Visão Computacional & Metrologia:** **OpenCV** (`opencv-python-headless`), **NumPy** e **SciPy** para calibração por régua milimetrada, alinhamento geométrico, normalização em espaço **CIELAB**, realce **CLAHE**, morfometria em `mm`/`mm²` e contraste perceptual **CIEDE2000** (`ΔE00`) em `backend/vision.py`.
+- **Laudos & Janela Desktop:** **ReportLab** para geração de PDFs (`backend/report.py`) e **pywebview** (`desktop_launcher.py`) com integração nativa em desktop e fallback automático de navegador.
+- **Testes Automatizados:** **pytest** cobrindo pipeline de visão, marca d'água, backup/restauração `.dmbak`, modais frontend e janela desktop (`tests/`).
+
+### Fluxo de Dados e Execução
+
+```mermaid
+flowchart LR
+    UI["Frontend Web / pywebview<br/>(frontend/)"] -->|HTTP Loopback + Token| API["FastAPI Backend<br/>(backend/main.py)"]
+    API --> VIS["Motor Fotogramétrico<br/>CIELAB + CLAHE + CIEDE2000<br/>(backend/vision.py)"]
+    API --> SEC["Segurança & Chaves<br/>Fernet + PBKDF2 + .dmkey<br/>(backend/security.py / recovery.py)"]
+    SEC --> DB[("SQLite Local<br/>(dermametric.db)")]
+    SEC --> BLOBS["Imagens & Artefatos<br/>Cifrados em Disco"]
+    API --> PDF["Gerador de Laudos PDF<br/>(backend/report.py)"]
+    API --> BAK["Backup / Restore<br/>Pacote .dmbak"]
+```
+
+### Criptografia e Derivação de Chaves
+
+- **Cifragem em repouso:** textos sensíveis e arquivos binários utilizam `Fernet` (`AES-128-CBC` com `HMAC-SHA256`, chave de 256 bits) via `backend/security.py`.
+- **Envelope da chave de dados (`DEK`) e recuperação (`.dmkey`):** a `DEK` efetiva pode ser embrulhada a partir da senha mestra ou de uma chave de recuperação `.dmkey` usando **PBKDF2-HMAC-SHA256** com salt aleatório de 16 bytes e **200.000 iterações** (`backend/recovery.py`). A senha de acesso/PIN da aplicação também é verificada com `PBKDF2-HMAC-SHA256` (`backend/auth.py`).
+- **Pacotes de backup (`.dmbak`):** o arquivo interno contém manifesto com `SHA-256` de cada item e é cifrado com material derivado via **PBKDF2-SHA256** (200.000 iterações + salt aleatório de 16 bytes) para `Fernet` e `HMAC-SHA256` (`backend/backup.py`).
+
+### Testes e Pipeline de Empacotamento / CI/CD
+
+- **Execução local dos testes:**
+  ```bash
+  .venv/bin/pytest -q
+  ```
+- **Empacotamento e instaladores:**
+  - **Linux:** `packaging/build-linux.sh` gera o bundle/AppImage (`DermaMetric-x86_64.AppImage` e `.tar.gz`), enquanto `packaging/install-linux.sh` instala em ambiente isolado no usuário sem `sudo`, cria atalhos `.desktop` (`packaging/dermametric.desktop`) e oferece `--smoke-test` e `--uninstall` preservando `data/`.
+  - **Windows:** `packaging/dermametric.spec` (PyInstaller) e `packaging/installer.iss` (Inno Setup) geram o instalador de usuário `DermaMetric-Setup.exe`.
+- **GitHub Actions (`.github/workflows/build-linux.yml` e `build-windows.yml`):** workflows automatizados que compilam os binários/instaladores, executam verificação de sanidade e publicam os artefatos nas releases disparadas por tags `v*` (ou via `workflow_dispatch`).
+
+---
+
+## Segurança e Privacidade (Boas Práticas LGPD)
+
+O DermaMetric adota **boas práticas** técnicas de minimização e proteção de dados sensíveis em alinhamento com os princípios da **LGPD** (a conformidade organizacional completa da clínica também depende de processos internos, consentimento e governança do controlador):
+
+- **Dados 100% locais e cifrados:** nenhum prontuário, medição ou fotografia é enviado a servidores externos por padrão.
+- **Criptografia em repouso:** campos sensíveis e arquivos de imagem são cifrados em disco com `Fernet` (`AES-128-CBC` + `HMAC-SHA256`), com chave de dados (`DEK`) protegida por envelope via `PBKDF2-SHA256` (200.000 iterações) e arquivo-chave de recuperação `.dmkey`.
+- **Backups protegidos e íntegros:** arquivos `.dmbak` empacotam registros e blobs com `SHA-256` e são cifrados com chave derivada por `PBKDF2-SHA256` + autenticação `HMAC-SHA256`.
 
 ---
 
@@ -109,19 +143,9 @@ O DermaMetric foi projetado desde a base para atender às boas práticas de prot
 
 O **DermaMetric** é um software **open-source** gratuito, desenvolvido de forma independente para oferecer fotogrametria clínica de precisão sem mensalidades.
 
-Se o projeto agrega valor à sua clínica, pesquisa ou prática profissional, considere apoiar o desenvolvimento contínuo com qualquer valor via **Pix**:
+Se o projeto agrega valor à sua clínica, pesquisa ou prática profissional, você pode apoiar o desenvolvimento contínuo via **Pix com chave aleatória (EVP)** — sem expor e-mail ou dados pessoais no código:
 
-<div align="center">
-  <img src="docs/pix-qrcode.png" alt="QR Code Pix - Apoie o DermaMetric" width="210" height="210" />
-  <p><strong>Chave Pix (E-mail):</strong> <code>marques-joao-e00@jim.com</code></p>
-  <p><sub>Escaneie o QR Code no aplicativo do seu banco (valor livre) ou copie a chave acima.</sub></p>
-</div>
-
-**Pix Copia e Cola (valor livre):**
-
-```text
-00020126460014br.gov.bcb.pix0124marques-joao-e00@jim.com5204000053039865802BR5912JOAO MAX DEV6009ITAPIPOCA62150511DERMAMETRIC6304E1A4
-```
+- **Chave Pix aleatória (EVP):** `ab5283df-d213-4266-8a02-380b52cf279f` *(gere uma chave aleatória no app do seu banco e substitua este valor antes de publicar)*.
 
 Você também pode apoiar gratuitamente:
 - Deixando uma **Star ⭐** neste repositório;
@@ -138,7 +162,7 @@ Para rodar o ambiente de desenvolvimento ou contribuir com o código:
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-# Iniciar interface web local (http://127.0.0.1:8000)
+# Iniciar servidor backend local
 .venv/bin/uvicorn backend.main:app --reload --port 8000
 
 # Ou iniciar a janela desktop nativa
@@ -151,5 +175,5 @@ python3 -m venv .venv
 ---
 
 <div align="center">
-  <p>Desenvolvido por <a href="https://github.com/joaomaxdev"><strong>joaomaxdev</strong></a></p>
+  <p>Desenvolvido por <strong>joaomaxdev</strong></p>
 </div>
