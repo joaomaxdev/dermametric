@@ -1382,9 +1382,7 @@ textarea { line-height: 1.45; }
 .ref-note { padding: 6px 9px 8px; font-size: 10.5px; color: var(--muted-2); line-height: 1.4; }
 
 /* Stria selector */
-.stria-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-
-.stria-card {
+.stria-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }.stria-card {
   display: grid;
   gap: 2px;
   text-align: left;
@@ -4345,4 +4343,62 @@ table.matrix td.final { font-weight: 800; text-align: right; }
   .topbar .about-open { padding: 0 9px; }
   .about-scroll { padding: 16px 14px 26px; }
   .about-letter { padding: 22px 20px; font-size: 14px; }
+}
+
+/* Auto-detecção assistida (CIELAB + GrabCut) */
+.auto-segment {
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(129, 140, 248, 0.08), rgba(129, 140, 248, 0.02));
+}
+
+.auto-segment .form-actions { margin-top: 6px; }
+
+.auto-sensitivity {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 10.5px;
+  color: var(--muted-2);
+}
+
+.auto-sensitivity input[type="range"] { width: 100%; accent-color: #6366f1; }
+
+.auto-sensitivity output {
+  min-width: 34px;
+  text-align: right;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 10px;
+  color: #c7d2fe;
+}
+
+.auto-mode {
+  display: inline-flex;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.auto-mode button {
+  border: 0;
+  background: transparent;
+  color: var(--muted-2);
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.auto-mode button.is-active {
+  background: rgba(99, 102, 241, 0.18);
+  color: #c7d2fe;
+  box-shadow: inset 0 0 0 1px rgba(129, 140, 248, 0.45);
 }

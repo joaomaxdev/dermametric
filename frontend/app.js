@@ -100,6 +100,11 @@ const state = {
   polygon: [],
   polygonActive: false,
   stria: "L1",
+  autoBox: null,
+  autoDrawing: false,
+  autoMode: "auto",
+  autoSensitivity: 0.5,
+  autoBusy: false,
   importedRois: null,
   loupe: true,
   spaceDown: false,
@@ -129,6 +134,7 @@ let renderToken = 0;
 let drag = null;
 let press = null;
 let lastPolygonClick = null;
+let autoSegmentTimer = 0;
 let canvasSize = { w: 0, h: 0 };
 let pinch = null;
 let wasPinching = false;
@@ -2873,6 +2879,7 @@ function drawOverlays(ctx) {
       drawPolygon(ctx, m.polygon, meta.stroke, meta.soft, lesionCode(m.stria_code), false);
     });
     drawGhostRois(ctx);
+    drawAutoBox(ctx, drag && drag.type === "autobox" ? drag.box : state.autoBox);
     const meta = lesionMeta(state.stria);
     if (state.polygon.length) {
       drawPolygon(ctx, state.polygon, meta.stroke, meta.soft, meta.short, true);
@@ -2970,6 +2977,26 @@ function drawGhostRois(ctx) {
   ghostRois().forEach((roi) => {
     drawGhostPolygon(ctx, roi.points, lesionMeta(roi.code));
   });
+}
+
+/** Caixa de busca da auto-detecção, desenhada em tracejado azul. */
+function drawAutoBox(ctx, box) {
+  if (!box || box[2] <= 0 || box[3] <= 0) return;
+  const a = toScreen([box[0], box[1]]);
+  const w = box[2] * view.zoom;
+  const h = box[3] * view.zoom;
+  ctx.save();
+  ctx.fillStyle = "rgba(129,140,248,0.10)";
+  ctx.strokeStyle = "#818cf8";
+  ctx.lineWidth = 1.6;
+  ctx.setLineDash([6, 4]);
+  ctx.fillRect(a.x, a.y, w, h);
+  ctx.strokeRect(a.x, a.y, w, h);
+  ctx.setLineDash([]);
+  ctx.fillStyle = "#c7d2fe";
+  ctx.font = "700 10px Inter, system-ui, sans-serif";
+  ctx.fillText(state.autoBusy ? "SEGMENTANDO…" : "CAIXA DE BUSCA", a.x + 6, Math.max(12, a.y - 6));
+  ctx.restore();
 }
 
 function roundRect(ctx, x, y, w, h, r) {
@@ -3253,6 +3280,19 @@ function onPointerDown(event) {
     return;
   }
 
+  if (event.button === 0 && state.step === 4 && state.autoDrawing) {
+    event.preventDefault();
+    const imagePoint = toImage(pt.x, pt.y);
+    press = { x: pt.x, y: pt.y, moved: false, button: 0 };
+    drag = {
+      type: "autobox",
+      start: imagePoint,
+      box: [imagePoint[0], imagePoint[1], 0, 0],
+    };
+    canvas.setPointerCapture?.(event.pointerId);
+    return;
+  }
+
   if (event.button === 0 && state.step === 3 && state.roiDrawing && !isAlignedPreview()) {
     event.preventDefault();
     const imagePoint = toImage(pt.x, pt.y);
@@ -3319,6 +3359,14 @@ function onPointerMove(event) {
     const h = Math.abs(imagePoint[1] - start[1]);
     drag.roi = [x, y, w, h];
     scheduleRedraw();
+  } else if (drag && drag.type === "autobox") {
+    const start = drag.start;
+    const x = Math.min(start[0], imagePoint[0]);
+    const y = Math.min(start[1], imagePoint[1]);
+    const w = Math.abs(imagePoint[0] - start[0]);
+    const h = Math.abs(imagePoint[1] - start[1]);
+    drag.box = [x, y, w, h];
+    scheduleRedraw();
   } else if (state.step === 4 && state.polygonActive) {
     scheduleRedraw();
   }
@@ -3361,6 +3409,37 @@ function onPointerUp(event) {
     drag = null;
     wrap.classList.remove("is-panning");
     canvas.releasePointerCapture?.(event.pointerId);
+    press = null;
+    return;
+  }
+
+  if (drag && drag.type === "autobox") {
+    const box = drag.box;
+    drag = null;
+    state.autoDrawing = false;
+    canvas.releasePointerCapture?.(event.pointerId);
+    if (box && box[2] >= 8 && box[3] >= 8) {
+      const bounds = currentImage ? [currentImage.naturalWidth, currentImage.naturalHeight] : null;
+      let [x, y, w, h] = box;
+      if (bounds) {
+        x = Math.max(0, Math.min(bounds[0] - 1, x));
+        y = Math.max(0, Math.min(bounds[1] - 1, y));
+        w = Math.min(w, bounds[0] - x);
+        h = Math.min(h, bounds[1] - y);
+      }
+      state.autoBox = [
+        Math.max(0, Math.floor(x)),
+        Math.max(0, Math.floor(y)),
+        Math.max(1, Math.ceil(w)),
+        Math.max(1, Math.ceil(h)),
+      ];
+      renderStepPanel();
+      scheduleRedraw();
+      runAutoSegment();
+    } else {
+      renderStepPanel();
+      toast("Arraste uma caixa maior ao redor da lesão.", "error");
+    }
     press = null;
     return;
   }
@@ -3519,6 +3598,7 @@ function onKeyDown(event) {
   if (event.key === "Escape") {
     state.polygon = [];
     state.polygonActive = false;
+    state.autoDrawing = false;
     lastPolygonClick = null;
     updatePolygonStatus();
     scheduleRedraw();
@@ -3619,6 +3699,9 @@ function syncToolsFromSession() {
   state.roi = Array.isArray(session.healthy_skin_roi) ? [...session.healthy_skin_roi] : null;
   state.polygon = [];
   state.polygonActive = false;
+  state.autoBox = null;
+  state.autoDrawing = false;
+  state.autoBusy = false;
   lastPolygonClick = null;
   state.hoverHit = null;
   state.landmarkPopover = null;
@@ -3795,6 +3878,7 @@ function setStep(step) {
   state.hoverHit = null;
   hideLandmarkPopover();
   if (step !== 3) state.step3Preview = false;
+  if (step !== 4) state.autoDrawing = false;
   updateHeader();
   renderStepNav();
   renderStepPanel();
@@ -4296,6 +4380,9 @@ function step4HTML(session) {
   const current = measurementFor(session, state.stria);
   const count = state.polygon.length;
   const ready = Boolean(session.aligned_image_url);
+  const t0Roi = isAlignedSpace()
+    ? referenceRois().find((roi) => roi.code === lesionCode(state.stria)) || null
+    : null;
 
   const lesionInputs = LESIONS.map((item) => `
     <div class="lesion-label-row">
@@ -4327,6 +4414,35 @@ function step4HTML(session) {
         </button>` : ""}
     </div>
     <p class="form-hint">${ready ? "Clique nos vértices acompanhando o contorno · clique num vértice para removê-lo · duplo clique fecha e mede." : "O polígono usa a imagem alinhada do passo 3."}</p>
+
+    ${ready ? `
+      <div class="auto-segment">
+        <div class="section-title"><span>Auto-detecção assistida</span><span>CIELAB + GrabCut</span></div>
+        <div class="form-actions">
+          <button type="button" class="btn btn-soft btn-sm ${state.autoDrawing ? "is-active" : ""}" data-action="auto-segment">
+            ${state.autoDrawing ? "Arraste a caixa na imagem…" : "Auto-detectar (Caixa)"}
+          </button>
+          ${t0Roi ? `
+            <button type="button" class="btn btn-soft btn-sm" data-action="auto-from-t0" ${state.autoBusy ? "disabled" : ""} title="Segmenta a lesão dentro do corredor do polígono de T0">
+              Auto-ajustar de T0
+            </button>
+            <button type="button" class="btn btn-ghost btn-sm" data-action="pin-t0-mask" title="Copia o polígono de T0 sem recalcular">
+              Fixar máscara de T0
+            </button>` : ""}
+        </div>
+        <label class="auto-sensitivity" for="auto-sensitivity">
+          <span>Sensibilidade</span>
+          <input id="auto-sensitivity" type="range" min="0.1" max="1" step="0.05" value="${state.autoSensitivity}" />
+          <output id="auto-sensitivity-value">${Number(state.autoSensitivity).toFixed(2)}</output>
+        </label>
+        <div class="auto-mode" role="group" aria-label="Perfil colorimétrico da auto-detecção">
+          ${[["auto", "Auto"], ["rubra", "Rubra"], ["alba", "Alba"]].map(([value, label]) => `
+            <button type="button" data-auto-mode="${value}" class="${state.autoMode === value ? "is-active" : ""}" aria-pressed="${state.autoMode === value}">${label}</button>`).join("")}
+        </div>
+        <p class="form-hint">${state.autoBox
+          ? `Caixa ${Math.round(state.autoBox[2])} × ${Math.round(state.autoBox[3])} px · revisão de vértices habilitada antes de medir.`
+          : "Desenhe uma caixa ao redor da lesão para segmentar automaticamente."}</p>
+      </div>` : ""}
 
     ${current ? `
       <div class="section-title"><span>Resultado de ${esc(lesionLabel(session, current.stria_code, current.stria_label))}</span><span>${new Date(current.created_at).toLocaleString("pt-BR")}</span></div>
@@ -4374,6 +4490,169 @@ function closePolygon() {
   measureStria();
 }
 
+/* --------------------------------------------------------------------------
+   Auto-detecção assistida (caixa + CIELAB/GrabCut)
+   -------------------------------------------------------------------------- */
+function polygonAreaPx(points) {
+  if (!Array.isArray(points) || points.length < 3) return 0;
+  let total = 0;
+  for (let index = 0; index < points.length; index += 1) {
+    const current = points[index];
+    const next = points[(index + 1) % points.length];
+    total += Number(current[0]) * Number(next[1]) - Number(next[0]) * Number(current[1]);
+  }
+  return Math.abs(total) / 2;
+}
+
+function polygonCentroid(points) {
+  if (!Array.isArray(points) || !points.length) return [0, 0];
+  if (points.length < 3) {
+    const sum = points.reduce((acc, p) => [acc[0] + Number(p[0]), acc[1] + Number(p[1])], [0, 0]);
+    return [sum[0] / points.length, sum[1] / points.length];
+  }
+  let area = 0;
+  let cx = 0;
+  let cy = 0;
+  for (let index = 0; index < points.length; index += 1) {
+    const current = points[index];
+    const next = points[(index + 1) % points.length];
+    const cross = Number(current[0]) * Number(next[1]) - Number(next[0]) * Number(current[1]);
+    area += cross;
+    cx += (Number(current[0]) + Number(next[0])) * cross;
+    cy += (Number(current[1]) + Number(next[1])) * cross;
+  }
+  area *= 0.5;
+  if (Math.abs(area) < 1e-6) {
+    const sum = points.reduce((acc, p) => [acc[0] + Number(p[0]), acc[1] + Number(p[1])], [0, 0]);
+    return [sum[0] / points.length, sum[1] / points.length];
+  }
+  return [cx / (6 * area), cy / (6 * area)];
+}
+
+/** Avisos visuais quando o contorno atual desvia demais do T0. */
+function t0DeviationWarnings(points, session) {
+  if (!session || isBaseline(session)) return [];
+  const reference = referenceRois().find((roi) => roi.code === lesionCode(state.stria));
+  if (!reference) return [];
+  const warnings = [];
+  const pxPerMm = Number(session.px_per_mm) || 0;
+  if (pxPerMm > 0) {
+    const current = polygonCentroid(points);
+    const baseline = polygonCentroid(reference.points);
+    const shiftMm = Math.hypot(current[0] - baseline[0], current[1] - baseline[1]) / pxPerMm;
+    if (shiftMm > 10) {
+      warnings.push(`centroide deslocado ${fmt(shiftMm, 1)} mm em relação a T0 (limite 10 mm)`);
+    }
+  }
+  const currentArea = polygonAreaPx(points);
+  const baselineArea = polygonAreaPx(reference.points);
+  if (baselineArea > 0 && currentArea / baselineArea > 1.35) {
+    warnings.push(`área ${fmt((currentArea / baselineArea - 1) * 100, 0)}% maior que T0 (limite 35%)`);
+  }
+  return warnings;
+}
+
+function referenceRoiForActive() {
+  if (!isAlignedSpace()) return null;
+  return referenceRois().find((roi) => roi.code === lesionCode(state.stria)) || null;
+}
+
+function scheduleAutoSegment() {
+  window.clearTimeout(autoSegmentTimer);
+  if (!state.autoBox || state.autoDrawing) return;
+  autoSegmentTimer = window.setTimeout(() => runAutoSegment(), 340);
+}
+
+async function runAutoSegment(options = {}) {
+  const session = activeSession();
+  if (!session) return;
+  if (!session.aligned_image_url) {
+    toast("Conclua o alinhamento da sessão antes da segmentação automática.", "error");
+    return;
+  }
+  const box = (options.box || state.autoBox || []).map(Number);
+  if (box.length !== 4 || box[2] < 4 || box[3] < 4) {
+    toast("Desenhe uma caixa ao redor da lesão para auto-detectar.", "error");
+    return;
+  }
+  if (state.autoBusy) return;
+  const reference = referenceRoiForActive();
+  const seed = options.seed !== undefined
+    ? options.seed
+    : (reference ? reference.points : null);
+  const mode = options.mode || state.autoMode;
+  const sensitivity = options.sensitivity !== undefined ? options.sensitivity : state.autoSensitivity;
+
+  state.autoBusy = true;
+  scheduleRedraw();
+  try {
+    const response = await postJSON(sessionEndpoint(session, "/auto-segment"), {
+      box,
+      seed_polygon: seed
+        ? seed.map((point) => [Number(point[0]), Number(point[1])])
+        : null,
+      sensitivity: Number(sensitivity),
+      mode,
+    });
+    if (!Array.isArray(response.polygon) || response.polygon.length < 3) {
+      throw new Error("A segmentação automática não retornou um polígono válido.");
+    }
+    state.polygon = response.polygon.map((point) => [Number(point[0]), Number(point[1])]);
+    state.polygonActive = true;
+    state.hover = null;
+    state.hoverHit = null;
+    lastPolygonClick = null;
+    toast(
+      `Auto-detecção ${mode} · ${Math.round(Number(response.area_px) || 0)} px² · confiança ${Math.round((Number(response.confidence) || 0) * 100)}%`,
+      "success",
+      5200,
+    );
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    state.autoBusy = false;
+    updatePolygonStatus();
+    scheduleRedraw();
+  }
+}
+
+function autoSegmentFromT0() {
+  const reference = referenceRoiForActive();
+  if (!reference) {
+    toast(`T0 não possui ROI medida para ${lesionCode(state.stria)}.`, "error");
+    return;
+  }
+  const xs = reference.points.map((point) => Number(point[0]));
+  const ys = reference.points.map((point) => Number(point[1]));
+  const pad = Math.max(6, 0.08 * Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)));
+  state.autoBox = [
+    Math.floor(Math.min(...xs) - pad),
+    Math.floor(Math.min(...ys) - pad),
+    Math.ceil(Math.max(...xs) - Math.min(...xs) + 2 * pad),
+    Math.ceil(Math.max(...ys) - Math.min(...ys) + 2 * pad),
+  ];
+  state.autoDrawing = false;
+  runAutoSegment({ box: state.autoBox, seed: reference.points });
+}
+
+function pinT0Mask() {
+  const reference = referenceRoiForActive();
+  if (!reference) {
+    toast(`T0 não possui ROI medida para ${lesionCode(state.stria)}.`, "error");
+    return;
+  }
+  state.polygon = reference.points.map((point) => [Number(point[0]), Number(point[1])]);
+  state.polygonActive = true;
+  state.autoDrawing = false;
+  state.hover = null;
+  state.hoverHit = null;
+  lastPolygonClick = null;
+  updatePolygonStatus();
+  renderStepPanel();
+  scheduleRedraw();
+  toast(`Máscara de ${lesionCode(state.stria)} fixada a partir de T0.`, "success", 4200);
+}
+
 async function measureStria() {
   const session = activeSession();
   if (!session) return;
@@ -4390,6 +4669,16 @@ async function measureStria() {
     return;
   }
   const snapshot = state.polygon.map((p) => [p[0], p[1]]);
+  const warnings = t0DeviationWarnings(snapshot, session);
+  if (warnings.length) {
+    const confirmed = window.confirm(
+      `Revisão necessária antes de salvar:\n\n• ${warnings.join("\n• ")}\n\nConfirma a medição mesmo assim?`,
+    );
+    if (!confirmed) {
+      toast("Medição não salva. Ajuste o contorno e tente novamente.", "info", 4600);
+      return;
+    }
+  }
   setBusy(true, "Calculando morfometria…");
   try {
     const response = await postJSON(sessionEndpoint(session, "/measure"), {
@@ -4515,6 +4804,28 @@ function bindStepPanel() {
   document.querySelectorAll("[data-lesion-input]").forEach((input) => {
     input.addEventListener("change", () => saveLesionLabels());
   });
+
+  const sensitivity = $("auto-sensitivity");
+  if (sensitivity) {
+    sensitivity.addEventListener("input", () => {
+      state.autoSensitivity = Number(sensitivity.value) || 0.5;
+      const output = $("auto-sensitivity-value");
+      if (output) output.textContent = state.autoSensitivity.toFixed(2);
+      scheduleAutoSegment();
+    });
+  }
+
+  document.querySelectorAll("[data-auto-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.autoMode = button.dataset.autoMode || "auto";
+      document.querySelectorAll("[data-auto-mode]").forEach((node) => {
+        const active = node === button;
+        node.classList.toggle("is-active", active);
+        node.setAttribute("aria-pressed", String(active));
+      });
+      if (state.autoBox) scheduleAutoSegment();
+    });
+  });
 }
 
 async function saveLesionLabels() {
@@ -4597,6 +4908,20 @@ function handleAction(action, target) {
     }
     case "goto-step4": setStep(4); break;
     case "measure-stria": measureStria(); break;
+    case "auto-segment": {
+      const session = activeSession();
+      if (!session || !session.aligned_image_url) {
+        toast("Conclua o alinhamento desta sessão antes de auto-detectar.", "error");
+        break;
+      }
+      state.autoDrawing = !state.autoDrawing;
+      if (state.autoDrawing) toast("Arraste uma caixa ao redor da lesão.", "info", 3600);
+      renderStepPanel();
+      scheduleRedraw();
+      break;
+    }
+    case "auto-from-t0": autoSegmentFromT0(); break;
+    case "pin-t0-mask": pinT0Mask(); break;
     case "close-polygon": closePolygon(); break;
     case "undo-vertex":
       state.polygon.pop();
@@ -4696,6 +5021,8 @@ function onDocumentClick(event) {
     state.stria = lesionCode(striaTarget.dataset.stria);
     state.polygon = [];
     state.polygonActive = false;
+    state.autoBox = null;
+    state.autoDrawing = false;
     lastPolygonClick = null;
     renderStepPanel();
     scheduleRedraw();

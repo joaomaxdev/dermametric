@@ -35,6 +35,7 @@ try:  # importação como pacote (uvicorn backend.main:app / pytest)
     from . import backup as backup_mod
     from .version import APP_VERSION
     from .models import (
+        AutoSegmentRequest,
         CalibrationRequest,
         ClinicalScalesRequest,
         LesionLabelsRequest,
@@ -54,6 +55,7 @@ except ImportError:  # pragma: no cover - execução direta de dentro de backend
     from version import APP_VERSION  # type: ignore[no-redef]
     import backup as backup_mod  # type: ignore[no-redef]
     from models import (  # type: ignore[no-redef]
+        AutoSegmentRequest,
         CalibrationRequest,
         ClinicalScalesRequest,
         LesionLabelsRequest,
@@ -886,6 +888,29 @@ def register(session_id: str, payload: RegisterRequest) -> dict[str, Any]:
         },
         "session": session,
     }
+
+
+@app.post("/api/sessions/{session_id}/auto-segment")
+def auto_segment(
+    session_id: str, payload: AutoSegmentRequest
+) -> dict[str, Any]:
+    """Segmenta a região-alvo com CIELAB + GrabCut guiada por caixa/T0."""
+    row = _require_session(session_id)
+    if not row["aligned_image_path"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Conclua o alinhamento da sessão antes da segmentação automática",
+        )
+    with _materialized(row["aligned_image_path"]) as aligned_path:
+        result = _vision_call(
+            vision.auto_segment_polygon,
+            str(aligned_path),
+            payload.box,
+            payload.seed_polygon,
+            payload.sensitivity,
+            payload.mode,
+        )
+    return {"session_id": session_id, **result}
 
 
 @app.post("/api/sessions/{session_id}/measure")

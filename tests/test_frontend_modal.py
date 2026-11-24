@@ -524,3 +524,51 @@ def test_images_are_loaded_via_authenticated_fetch():
     assert "hydrateThumbnails(panel)" in js
     assert "assignImageElement(base, urls.base)" in js
     assert "assignImageElement(top, urls.top)" in js
+
+
+# ---------------------------------------------------------------------------
+# Auto-detecção assistida (caixa + CIELAB/GrabCut) e guia por T0
+# ---------------------------------------------------------------------------
+def test_auto_segment_controls_and_api_calls():
+    js = _js()
+    # Ferramenta de caixa, seletor de perfil e painel de sensibilidade.
+    assert 'data-action="auto-segment"' in js
+    assert 'id="auto-sensitivity"' in js
+    assert 'data-auto-mode="${value}"' in js
+    assert '["auto", "Auto"], ["rubra", "Rubra"], ["alba", "Alba"]' in js
+    assert "Auto-detectar (Caixa)" in js
+    # Ações guiadas por T0 no seguimento.
+    assert 'data-action="auto-from-t0"' in js
+    assert 'data-action="pin-t0-mask"' in js
+    assert "Auto-ajustar de T0" in js
+    assert "Fixar máscara de T0" in js
+    # Chamada autenticada ao endpoint e envio do corredor/sensibilidade.
+    call = js.split("async function runAutoSegment", 1)[1].split("\n}", 1)[0]
+    assert '"/auto-segment"' in call
+    assert "seed_polygon" in call
+    assert "sensitivity" in call
+    assert "mode" in call
+    # Debounce da sensibilidade e edição fina do resultado.
+    assert "function scheduleAutoSegment" in js
+    assert "window.clearTimeout(autoSegmentTimer)" in js
+    assert "state.polygon = response.polygon" in call
+
+
+def test_auto_segment_ghost_overlay_and_t0_validation():
+    js = _js()
+    # Fantasma tracejado translúcido dos polígonos de T0.
+    assert "function drawGhostPolygon" in js
+    assert "setLineDash([4, 4])" in js
+    assert "drawGhostRois(ctx)" in js
+    # Caixa de busca desenhada por arraste.
+    assert "type: \"autobox\"" in js
+    assert "function drawAutoBox" in js
+    # Validação visual antes de salvar desvios relevantes.
+    assert "function t0DeviationWarnings" in js
+    assert "> 10" in js
+    assert "1.35" in js
+    assert "window.confirm(" in js
+    css = _css()
+    assert ".auto-segment" in css
+    assert ".auto-sensitivity" in css
+    assert ".auto-mode" in css

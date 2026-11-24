@@ -972,3 +972,293 @@ def measure_stria_polygon(
         "area_mm2": float(area_mm2),
         "delta_e_00": delta_e,
     }
+
+
+# ---------------------------------------------------------------------------
+# 5. Segmentação assistida por CIELAB + GrabCut
+# ---------------------------------------------------------------------------
+AUTO_SEGMENT_MODES = ("auto", "rubra", "alba")
+
+
+def _auto_odd(value: float) -> int:
+    size = max(3, int(round(value)))
+    return size if size % 2 == 1 else size + 1
+
+
+def _auto_clamp_box(
+    box: Iterable[float], width: int, height: int
+) -> tuple[int, int, int, int]:
+    values = [float(item) for item in box]
+    if len(values) != 4:
+        raise ValueError("box deve conter exatamente [x, y, w, h]")
+    x, y, w, h = values
+    if w <= 0 or h <= 0:
+        raise ValueError("box deve ter largura e altura positivas")
+    x0 = int(np.clip(round(x), 0, width - 1))
+    y0 = int(np.clip(round(y), 0, height - 1))
+    x1 = int(np.clip(round(x + w), x0 + 1, width))
+    y1 = int(np.clip(round(y + h), y0 + 1, height))
+    if x1 - x0 < 4 or y1 - y0 < 4:
+        raise ValueError("box muito pequena para segmentar")
+    return x0, y0, x1 - x0, y1 - y0
+
+
+def _auto_skin_ring(
+    shape: tuple[int, int], box: tuple[int, int, int, int]
+) -> np.ndarray:
+    """Anel de pele sadia ao redor da caixa, com moldura da imagem como reserva."""
+    height, width = shape
+    x, y, w, h = box
+    box_mask = np.zeros((height, width), dtype=np.uint8)
+    cv2.rectangle(box_mask, (x, y), (x + w - 1, y + h - 1), 255, -1)
+    thickness = max(3, int(round(0.08 * max(w, h))))
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (2 * thickness + 1, 2 * thickness + 1)
+    )
+    ring = cv2.bitwise_and(cv2.dilate(box_mask, kernel), cv2.bitwise_not(box_mask))
+    if cv2.countNonZero(ring) < 256:
+        border = max(2, int(round(0.03 * min(height, width))))
+        ring = np.zeros((height, width), dtype=np.uint8)
+        ring[:border, :] = 255
+        ring[-border:, :] = 255
+        ring[:, :border] = 255
+        ring[:, -border:] = 255
+        ring = cv2.bitwise_and(ring, cv2.bitwise_not(box_mask))
+    if cv2.countNonZero(ring) == 0:
+        ring = cv2.bitwise_not(box_mask)
+    return ring
+
+
+def _auto_color_score(
+    lab: np.ndarray,
+    healthy_mean: np.ndarray,
+    healthy_std: np.ndarray,
+    mode: str,
+) -> np.ndarray:
+    """Mapa de afinidade colorimétrica à lesão, em unidades de desvio sadio."""
+    if mode not in AUTO_SEGMENT_MODES:
+        raise ValueError(f"Modo de segmentação inválido: {mode}")
+
+    lightness = lab[..., 0]
+    a_channel = lab[..., 1]
+    b_channel = lab[..., 2]
+    chroma = np.hypot(a_channel, b_channel)
+
+    # Piso de 1 unidade CIELAB evita amplificar ruído de pele uniforme.
+    std = np.maximum(np.asarray(healthy_std, dtype=np.float64), 1.0)
+    mean_l, mean_a, mean_b = (float(v) for v in healthy_mean)
+    mean_chroma = float(np.hypot(mean_a, mean_b))
+    std_chroma = max(float(np.hypot(std[1], std[2])), 1.0)
+
+    # Rubra: eritema (a* alto) e, secundariamente, escurecimento relativo.
+    rubra = (a_channel - mean_a) / std[1] + 0.35 * (mean_l - lightness) / std[0]
+    # Alba: clareamento (L* alto) e perda de croma (aspecto nacarado).
+    alba = (lightness - mean_l) / std[0] + 0.35 * (mean_chroma - chroma) / std_chroma
+
+    if mode == "rubra":
+        return rubra
+    if mode == "alba":
+        return alba
+    return np.maximum(rubra, alba)
+
+
+def _auto_largest_component(mask: np.ndarray) -> np.ndarray:
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if count <= 1:
+        return np.zeros_like(mask)
+    best = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    return np.where(labels == best, 255, 0).astype(np.uint8)
+
+
+def _auto_polygon_from_mask(
+    mask: np.ndarray, fallback: list[list[float]]
+) -> tuple[list[list[float]], float]:
+    """Aproxima o maior contorno com 10–30 vértices (fallback quando vazio)."""
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return fallback, 0.0
+    contour = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(contour) < 12.0:
+        return fallback, 0.0
+
+    perimeter = cv2.arcLength(contour, True)
+    if perimeter <= 0:
+        return fallback, 0.0
+
+    best: np.ndarray | None = None
+    best_distance = 10**9
+    for step in range(1, 81):
+        epsilon = perimeter * (0.001 + step * 0.0012)
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+        count = len(approx)
+        if 10 <= count <= 30:
+            best = approx
+            break
+        distance = min(abs(count - 10), abs(count - 30))
+        if distance < best_distance:
+            best_distance = distance
+            best = approx
+
+    if best is None or len(best) < 3:
+        return fallback, 0.0
+    points = [
+        [float(round(point[0][0], 2)), float(round(point[0][1], 2))]
+        for point in best
+    ]
+    return points, float(abs(cv2.contourArea(best)))
+
+
+def auto_segment_polygon(
+    aligned_img_path: str,
+    box: Iterable[float],
+    seed_polygon: Iterable[Iterable[float]] | None = None,
+    sensitivity: float = 0.5,
+    mode: str = "auto",
+) -> dict[str, object]:
+    """Segmenta a região-alvo com estatísticas CIELAB da pele + GrabCut.
+
+    A caixa ``[x, y, w, h]`` define a área de busca. A pele saudável é
+    amostrada no anel externo da caixa (com a moldura da imagem como
+    reserva) e cada pixel recebe uma afinidade colorimétrica normalizada pelo
+    desvio-padrão sadio. ``seed_polygon`` restringe os candidatos a um
+    corredor dilatado — útil para acompanhar a mesma lesão em T1..Tn.
+
+    Returns:
+        ``{"polygon": [[x, y], ...], "area_px": float, "confidence": float}``.
+    """
+    if not 0.1 <= float(sensitivity) <= 1.0:
+        raise ValueError("sensitivity deve estar entre 0.1 e 1.0")
+    if mode not in AUTO_SEGMENT_MODES:
+        raise ValueError(f"Modo de segmentação inválido: {mode}")
+
+    image = read_image_bgr(aligned_img_path)
+    height, width = image.shape[:2]
+    x, y, w, h = _auto_clamp_box(box, width, height)
+    lab = bgr_to_cielab_float(image)
+
+    ring = _auto_skin_ring((height, width), (x, y, w, h))
+    ring_pixels = lab[ring > 0]
+    if ring_pixels.size == 0:
+        raise ValueError("Não foi possível amostrar pele sadia ao redor da caixa")
+    healthy_mean = ring_pixels.mean(axis=0)
+    healthy_std = ring_pixels.std(axis=0)
+
+    score = _auto_color_score(lab, healthy_mean, healthy_std, mode)
+    # Sensibilidade alta admite desvios menores em relação à pele sadia.
+    threshold = 0.9 + (0.5 - float(sensitivity)) * 1.6
+
+    box_mask = np.zeros((height, width), dtype=np.uint8)
+    cv2.rectangle(box_mask, (x, y), (x + w - 1, y + h - 1), 255, -1)
+
+    candidates = np.where(score > threshold, 255, 0).astype(np.uint8)
+    candidates = cv2.bitwise_and(candidates, box_mask)
+
+    corridor: np.ndarray | None = None
+    if seed_polygon is not None:
+        seed_points = np.asarray(list(seed_polygon), dtype=np.float64)
+        if seed_points.ndim != 2 or seed_points.shape[1] != 2 or len(seed_points) < 3:
+            raise ValueError("seed_polygon inválido: mínimo de 3 vértices [x, y]")
+        seed_mask = np.zeros((height, width), dtype=np.uint8)
+        cv2.fillPoly(seed_mask, [np.rint(seed_points).astype(np.int32)], 255)
+        span = max(
+            float(seed_points[:, 0].max() - seed_points[:, 0].min()),
+            float(seed_points[:, 1].max() - seed_points[:, 1].min()),
+        )
+        radius = max(3, int(round(0.12 * span)))
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1)
+        )
+        corridor = cv2.dilate(seed_mask, kernel)
+        candidates = cv2.bitwise_and(candidates, corridor)
+
+    kernel_size = _auto_odd(0.02 * min(w, h))
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
+    )
+    candidates = cv2.morphologyEx(candidates, cv2.MORPH_OPEN, kernel)
+    candidates = cv2.morphologyEx(candidates, cv2.MORPH_CLOSE, kernel)
+    candidates = _auto_largest_component(candidates)
+
+    # Fallback limpo: contorno de T0 (se houver) ou a própria caixa.
+    if seed_polygon is not None:
+        fallback = [
+            [float(round(point[0], 2)), float(round(point[1], 2))]
+            for point in seed_points
+        ]
+    else:
+        fallback = [
+            [float(x), float(y)],
+            [float(x + w), float(y)],
+            [float(x + w), float(y + h)],
+            [float(x), float(y + h)],
+        ]
+
+    if cv2.countNonZero(candidates) == 0:
+        return {
+            "polygon": fallback,
+            "area_px": 0.0,
+            "confidence": 0.05,
+        }
+
+    # GrabCut refina a máscara em um recorte com folga ao redor da caixa.
+    pad = max(8, int(round(0.2 * max(w, h))))
+    cx0, cy0 = max(0, x - pad), max(0, y - pad)
+    cx1, cy1 = min(width, x + w + pad), min(height, y + h + pad)
+    crop = image[cy0:cy1, cx0:cx1]
+    local_box = box_mask[cy0:cy1, cx0:cx1]
+    local_candidates = candidates[cy0:cy1, cx0:cx1]
+
+    gc_mask = np.full(crop.shape[:2], cv2.GC_BGD, dtype=np.uint8)
+    inside_box = local_box > 0
+    gc_mask[inside_box] = cv2.GC_PR_BGD
+    gc_mask[local_candidates > 0] = cv2.GC_PR_FGD
+    refined = candidates
+    if cv2.countNonZero(gc_mask == cv2.GC_PR_FGD) >= 8:
+        background = np.zeros((1, 65), dtype=np.float64)
+        foreground = np.zeros((1, 65), dtype=np.float64)
+        try:
+            cv2.grabCut(
+                crop,
+                gc_mask,
+                None,
+                background,
+                foreground,
+                3,
+                cv2.GC_INIT_WITH_MASK,
+            )
+            grabcut = np.where(
+                (gc_mask == cv2.GC_FGD) | (gc_mask == cv2.GC_PR_FGD), 255, 0
+            ).astype(np.uint8)
+            grabcut = cv2.bitwise_and(grabcut, local_box)
+            if cv2.countNonZero(grabcut) >= 8:
+                refined = np.zeros((height, width), dtype=np.uint8)
+                refined[cy0:cy1, cx0:cx1] = grabcut
+        except cv2.error:
+            refined = candidates
+
+    refined = cv2.bitwise_and(refined, box_mask)
+    if corridor is not None:
+        refined = cv2.bitwise_and(refined, corridor)
+    refined = cv2.morphologyEx(refined, cv2.MORPH_CLOSE, kernel)
+    refined = _auto_largest_component(refined)
+    if cv2.countNonZero(refined) == 0:
+        refined = candidates
+
+    polygon, area_px = _auto_polygon_from_mask(refined, fallback)
+    inside = score[refined > 0]
+    contrast = float(np.tanh(float(inside.mean()) / 3.0)) if inside.size else 0.0
+    perimeter = cv2.arcLength(
+        np.asarray(polygon, dtype=np.float32).reshape(-1, 1, 2), True
+    )
+    compactness = 0.0
+    if perimeter > 0:
+        compactness = float(min(1.0, 4.0 * np.pi * area_px / (perimeter**2)))
+    confidence = float(
+        np.clip(0.35 + 0.45 * contrast + 0.2 * compactness, 0.05, 0.98)
+    )
+
+    return {
+        "polygon": polygon,
+        "area_px": float(area_px),
+        "confidence": confidence,
+    }
