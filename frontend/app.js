@@ -1580,8 +1580,8 @@ function resetCaseImport() {
   state.caseImport = { file: null, summary: null };
   const input = $("case-import-file");
   if (input) input.value = "";
-  const password = $("case-import-password");
-  if (password) password.value = "";
+  const pin = $("case-import-pin");
+  if (pin) pin.value = "";
   updateCaseImportFileStatus(null);
   setLockError("case-import-error", "");
   const preview = $("case-import-preview");
@@ -1710,20 +1710,20 @@ function clearCaseImportPreview() {
 
 async function validateCaseImport() {
   const file = state.caseImport.file || $("case-import-file")?.files?.[0];
-  const password = $("case-import-password")?.value || "";
+  const pin = ($("case-import-pin")?.value || "").trim();
   setLockError("case-import-error", "");
   clearCaseImportPreview();
   if (!file) {
     setLockError("case-import-error", "Selecione o arquivo .dmbak do caso a importar.");
     return;
   }
-  if (!password) {
-    setLockError("case-import-error", "Informe a senha do arquivo (do caso ou mestra da estação).");
+  if (!/^\d{4,8}$/.test(pin)) {
+    setLockError("case-import-error", "Informe o PIN do caso (4 a 8 dígitos numéricos).");
     return;
   }
   const form = new FormData();
   form.append("file", file);
-  form.append("password", password);
+  form.append("case_pin", pin);
   setBusy(true, "Validando o caso (.dmbak)…");
   try {
     const summary = await api("/api/backup/inspect", { method: "POST", body: form });
@@ -1768,15 +1768,15 @@ async function validateCaseImport() {
 async function submitCaseImport(event) {
   event?.preventDefault?.();
   const file = state.caseImport.file || $("case-import-file")?.files?.[0];
-  const password = $("case-import-password")?.value || "";
+  const pin = ($("case-import-pin")?.value || "").trim();
   const summary = state.caseImport.summary;
   setLockError("case-import-error", "");
   if (!file) {
     setLockError("case-import-error", "Selecione o arquivo .dmbak do caso a importar.");
     return;
   }
-  if (!password) {
-    setLockError("case-import-error", "Informe a senha do arquivo do caso.");
+  if (!/^\d{4,8}$/.test(pin)) {
+    setLockError("case-import-error", "Informe o PIN do caso (4 a 8 dígitos numéricos).");
     return;
   }
   if (!summary) {
@@ -1790,7 +1790,7 @@ async function submitCaseImport(event) {
 
   const form = new FormData();
   form.append("file", file);
-  form.append("password", password);
+  form.append("case_pin", pin);
   form.append("mode", "merge");
   form.append("import_as_new", importAsNew ? "true" : "false");
 
@@ -1905,7 +1905,7 @@ async function resetPatientPin(remove) {
     return;
   }
   if (!remove && !/^\d{4,6}$/.test(newPin)) {
-    setLockError("pin-reset-error", "O novo PIN deve ter de 4 a 6 dígitos numéricos.");
+    setLockError("pin-reset-error", "O novo PIN deve ter de 4 a 8 dígitos numéricos.");
     return;
   }
   setBusy(true, remove ? "Removendo PIN…" : "Redefinindo PIN…");
@@ -1949,7 +1949,7 @@ async function confirmUnlock() {
   setLockError("pin-error", "");
   if (!patient) return;
   if (pin.length < 4) {
-    setLockError("pin-error", "Informe o PIN de 4 a 6 dígitos.");
+    setLockError("pin-error", "Informe o PIN de 4 a 8 dígitos.");
     return;
   }
   setBusy(true, "Validando PIN…");
@@ -2214,7 +2214,7 @@ async function confirmFinishPatient() {
   if (!patient) return;
   const pin = ($("lock-pin-input")?.value || "").trim();
   if (pin && !/^\d{4,6}$/.test(pin)) {
-    toast("O PIN deve ter de 4 a 6 dígitos numéricos.", "error");
+    toast("O PIN deve ter de 4 a 8 dígitos numéricos.", "error");
     return;
   }
   setBusy(true, "Finalizando atendimento…");
@@ -5045,14 +5045,15 @@ function triggerBlobDownload(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 6000);
 }
 
-async function requestBackupExport(password, patientId = null, archivePassword = "") {
+async function requestBackupExport(password, patientId = null, casePin = "") {
   const headers = { "Content-Type": "application/json" };
   if (DESKTOP_LAUNCH_TOKEN) headers["X-DermaMetric-Launch"] = DESKTOP_LAUNCH_TOKEN;
   if (state.auth.token) headers.Authorization = `Bearer ${state.auth.token}`;
   const body = { password };
-  if (patientId) body.patient_id = patientId;
-  const dedicated = String(archivePassword || "").trim();
-  if (patientId && dedicated) body.archive_password = dedicated;
+  if (patientId) {
+    body.patient_id = patientId;
+    body.pin = String(casePin || "").trim();
+  }
   const response = await fetch("/api/backup/export", {
     method: "POST",
     headers,
@@ -5117,41 +5118,29 @@ async function exportFullBackup() {
 }
 
 function resetExportCaseExtras() {
-  const checkbox = $("export-case-custom-password");
-  if (checkbox) checkbox.checked = false;
-  const field = $("export-case-file-password-field");
-  if (field) field.hidden = true;
-  const password = $("export-case-file-password");
-  if (password) {
-    password.value = "";
-    password.type = "password";
+  const pin = $("export-case-pin");
+  if (pin) {
+    pin.value = "";
+    pin.type = "password";
   }
-  const toggle = $("export-case-file-password-toggle");
+  const toggle = $("export-case-pin-toggle");
   if (toggle) {
     toggle.setAttribute("aria-pressed", "false");
-    toggle.setAttribute("aria-label", "Mostrar senha");
-    toggle.title = "Mostrar senha";
+    toggle.setAttribute("aria-label", "Mostrar PIN");
+    toggle.title = "Mostrar PIN";
   }
 }
 
-function syncExportCasePasswordField() {
-  const checkbox = $("export-case-custom-password");
-  const field = $("export-case-file-password-field");
-  const enabled = Boolean(checkbox?.checked);
-  if (field) field.hidden = !enabled;
-  if (enabled) setTimeout(() => $("export-case-file-password")?.focus(), 30);
-}
-
-function toggleExportCasePasswordVisibility() {
-  const input = $("export-case-file-password");
-  const toggle = $("export-case-file-password-toggle");
+function toggleExportCasePinVisibility() {
+  const input = $("export-case-pin");
+  const toggle = $("export-case-pin-toggle");
   if (!input) return;
   const show = input.type === "password";
   input.type = show ? "text" : "password";
   if (toggle) {
     toggle.setAttribute("aria-pressed", String(show));
-    toggle.setAttribute("aria-label", show ? "Ocultar senha" : "Mostrar senha");
-    toggle.title = show ? "Ocultar senha" : "Mostrar senha";
+    toggle.setAttribute("aria-label", show ? "Ocultar PIN" : "Mostrar PIN");
+    toggle.title = show ? "Ocultar PIN" : "Mostrar PIN";
   }
 }
 
@@ -5181,15 +5170,24 @@ function exportPatientCaseBackup() {
   resetExportCaseExtras();
   const title = $("export-case-title");
   if (title) title.textContent = `Exportar Caso ${patient.code || ""} (.dmbak)`;
+  const hasPin = Boolean(patient.has_pin ?? patient.locked);
   const desc = $("export-case-desc");
   if (desc) {
-    desc.textContent = `Informe a senha mestra da estação para cifrar o prontuário ${patient.code || ""} com todas as sessões e imagens.`;
+    desc.textContent = `Informe a senha mestra da estação e ${hasPin ? "confirme o PIN já cadastrado" : "defina um PIN de 4 a 8 dígitos"} para proteger o prontuário ${patient.code || ""}. O arquivo será cifrado apenas com o PIN do caso.`;
+  }
+  const label = $("export-case-pin-label");
+  if (label) label.textContent = hasPin ? "PIN do caso (confirme o PIN cadastrado)" : "Definir PIN do caso (4 a 8 dígitos)";
+  const hint = $("export-case-pin-hint");
+  if (hint) {
+    hint.textContent = hasPin
+      ? "Este PIN já protege o prontuário. Ao importar em outra estação, apenas ele será solicitado."
+      : "Este PIN passará a proteger o prontuário e será exigido para abrir o arquivo em outra estação.";
   }
   modal.hidden = false;
   modal.removeAttribute("hidden");
   modal.setAttribute("aria-hidden", "false");
   document.body.classList.add("has-modal");
-  setTimeout(() => input?.focus(), 40);
+  setTimeout(() => $("export-case-pin")?.focus(), 40);
 }
 
 async function submitExportCaseBackup(event) {
@@ -5200,31 +5198,23 @@ async function submitExportCaseBackup(event) {
     return;
   }
   const password = $("export-case-password")?.value || "";
-  const useCustom = Boolean($("export-case-custom-password")?.checked);
-  const archivePassword = useCustom ? ($("export-case-file-password")?.value || "") : "";
+  const casePin = ($("export-case-pin")?.value || "").trim();
   setLockError("export-case-error", "");
   if (!password) {
     setLockError("export-case-error", "Informe a senha mestra para exportar o caso.");
     return;
   }
-  if (useCustom) {
-    if (!archivePassword) {
-      setLockError("export-case-error", "Defina a senha específica do arquivo do caso.");
-      return;
-    }
-    if (archivePassword.length < 6) {
-      setLockError("export-case-error", "A senha do arquivo deve ter ao menos 6 caracteres.");
-      return;
-    }
+  if (!/^\d{4,8}$/.test(casePin)) {
+    setLockError("export-case-error", "O PIN do caso deve ter de 4 a 8 dígitos numéricos.");
+    return;
   }
   setBusy(true, "Gerando backup do caso (.dmbak)…");
   try {
-    const filename = await requestBackupExport(password, patient.id, archivePassword);
+    const filename = await requestBackupExport(password, patient.id, casePin);
+    patient.has_pin = true;
+    patient.locked = true;
     closeExportCaseModal();
-    const note = archivePassword
-      ? " Protegido pela senha específica do arquivo."
-      : "";
-    toast(`Caso ${patient.code || ""} exportado: ${filename}.${note}`.trim(), "success", 5200);
+    toast(`Caso ${patient.code || ""} exportado: ${filename}. Protegido pelo PIN do caso.`, "success", 5200);
   } catch (error) {
     setLockError("export-case-error", error.message);
   } finally {
@@ -6078,7 +6068,7 @@ function closeHelpModal() {
   document.querySelectorAll(".help-entry.is-target").forEach((node) => {
     node.classList.remove("is-target");
   });
-  const otherOpen = ["profile-modal", "patient-modal", "pin-modal", "lock-patient-modal", "compare-modal", "personal-data-modal"]
+  const otherOpen = ["profile-modal", "patient-modal", "pin-modal", "lock-patient-modal", "compare-modal", "personal-data-modal", "about-modal"]
     .some((id) => {
       const node = $(id);
       return node && !node.hidden;
@@ -6112,6 +6102,75 @@ function onHelpBadgeClick(event) {
   openHelpModal({ target: badge.dataset.help });
 }
 
+/* --------------------------------------------------------------------------
+   Tela "Sobre" (carta institucional) e dedicatória discreta
+   -------------------------------------------------------------------------- */
+let aboutLogoClickCount = 0;
+let aboutDedicationVisible = false;
+
+function openAboutModal() {
+  const modal = $("about-modal");
+  if (!modal) return;
+  modal.hidden = false;
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("has-modal");
+  const letter = modal.querySelector(".about-scroll");
+  if (letter) letter.scrollTop = 0;
+  requestAnimationFrame(() => modal.querySelector(".about-modal")?.focus?.());
+}
+
+function closeAboutModal() {
+  const modal = $("about-modal");
+  if (!modal || modal.hidden) return;
+  modal.hidden = true;
+  modal.setAttribute("aria-hidden", "true");
+  aboutLogoClickCount = 0;
+  aboutDedicationVisible = false;
+  const dedication = $("about-dedication");
+  if (dedication) {
+    dedication.hidden = true;
+    dedication.classList.remove("is-visible");
+  }
+  const otherOpen = [
+    "profile-modal", "patient-modal", "pin-modal", "lock-patient-modal",
+    "compare-modal", "personal-data-modal", "help-modal", "update-modal",
+  ].some((id) => {
+    const node = $(id);
+    return node && !node.hidden;
+  });
+  if (state.screen !== "lock" && !otherOpen) document.body.classList.remove("has-modal");
+}
+
+function onAboutLogoClick() {
+  const dedication = $("about-dedication");
+  if (!dedication) return;
+  if (aboutDedicationVisible) {
+    aboutDedicationVisible = false;
+    dedication.classList.remove("is-visible");
+    dedication.hidden = true;
+    aboutLogoClickCount = 0;
+    return;
+  }
+  aboutLogoClickCount += 1;
+  if (aboutLogoClickCount < 5) return;
+  aboutLogoClickCount = 0;
+  aboutDedicationVisible = true;
+  dedication.hidden = false;
+  // Duas frames garantem que a transição de opacidade seja percebida.
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => dedication.classList.add("is-visible"));
+  });
+}
+
+function onAboutKeyDown(event) {
+  const modal = $("about-modal");
+  if (!modal || modal.hidden) return;
+  if (event.key !== "Escape") return;
+  event.preventDefault();
+  event.stopPropagation();
+  closeAboutModal();
+}
+
 function bindEvents() {
   const canvas = $("stage");
   canvas.addEventListener("pointerdown", onPointerDown);
@@ -6140,6 +6199,12 @@ function bindEvents() {
   document.querySelectorAll("[data-close-help]").forEach((node) => {
     node.addEventListener("click", closeHelpModal);
   });
+  $("about-open")?.addEventListener("click", openAboutModal);
+  document.querySelectorAll("[data-close-about]").forEach((node) => {
+    node.addEventListener("click", closeAboutModal);
+  });
+  $("about-logo")?.addEventListener("click", onAboutLogoClick);
+  document.addEventListener("keydown", onAboutKeyDown, true);
   $("update-open")?.addEventListener("click", openUpdateModal);
   $("update-check")?.addEventListener("click", checkForUpdates);
   $("update-apply")?.addEventListener("click", applyUpdate);
@@ -6372,8 +6437,7 @@ function bindPatientEvents() {
   }
   $("patient-export-backup")?.addEventListener("click", exportPatientCaseBackup);
   $("export-case-form")?.addEventListener("submit", submitExportCaseBackup);
-  $("export-case-custom-password")?.addEventListener("change", syncExportCasePasswordField);
-  $("export-case-file-password-toggle")?.addEventListener("click", toggleExportCasePasswordVisibility);
+  $("export-case-pin-toggle")?.addEventListener("click", toggleExportCasePinVisibility);
   document.querySelectorAll("[data-close-export-case]").forEach((node) => {
     node.addEventListener("click", closeExportCaseModal);
   });

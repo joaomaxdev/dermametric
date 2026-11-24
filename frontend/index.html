@@ -150,6 +150,14 @@
         </svg>
         <span id="app-version">v—</span>
       </button>
+      <button id="about-open" class="btn btn-ghost about-open" type="button" title="Sobre o DermaMetric" aria-label="Abrir a tela Sobre o DermaMetric" aria-haspopup="dialog">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 11v5" />
+          <path d="M12 7.6h.01" />
+        </svg>
+        <span class="about-open-label">Sobre</span>
+      </button>
       <button id="help-open" class="btn btn-ghost help-open" type="button" title="Guia de uso e glossário metodológico — disponível offline" aria-label="Abrir Guia de Uso e Metodologia">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <circle cx="12" cy="12" r="9" />
@@ -801,15 +809,16 @@
         </form>
 
         <section id="patient-panel-import" class="profile-tab-panel case-import" role="tabpanel" aria-labelledby="patient-tab-import" hidden>
-          <p class="form-hint">Receba um caso de outro profissional. O arquivo <span class="mono">.dmbak</span> é validado antes de qualquer gravação e nunca sobrescreve prontuários locais.</p>
+          <p class="form-hint">Receba um caso de outro profissional. O arquivo <span class="mono">.dmbak</span> é protegido pelo PIN do caso e re-criptografado com a chave mestra desta estação ao importar.</p>
           <div class="backup-file-box" id="case-import-drop">
             <label class="backup-file-label" for="case-import-file">Arquivo do caso (.dmbak)</label>
             <input id="case-import-file" class="backup-file-native" type="file" accept=".dmbak,application/vnd.dermametric.backup" />
             <div id="case-import-file-status" class="backup-file-status">Nenhum arquivo selecionado. Clique acima para escolher ou arraste o .dmbak aqui.</div>
           </div>
           <div class="field">
-            <span>Senha do arquivo (.dmbak)</span>
-            <input id="case-import-password" type="password" autocomplete="off" placeholder="Senha do caso (mestra ou definida na exportação)" />
+            <span>PIN do caso (4 a 8 dígitos)</span>
+            <input id="case-import-pin" type="password" autocomplete="off" inputmode="numeric" maxlength="8" minlength="4" placeholder="PIN definido na exportação do caso" />
+            <small>O PIN abre somente o pacote do caso. Nenhuma senha mestra de outra estação é necessária.</small>
           </div>
           <p id="case-import-error" class="form-hint is-error" hidden></p>
           <div class="form-actions">
@@ -862,7 +871,7 @@
         <p>Este prontuário está protegido por PIN. Informe o PIN para acessar.</p>
         <div class="field">
           <span>PIN (4-6 dígitos)</span>
-          <input id="pin-input" type="password" maxlength="6" minlength="4" inputmode="numeric" placeholder="0000" autocomplete="one-time-code" />
+          <input id="pin-input" type="password" maxlength="8" minlength="4" inputmode="numeric" placeholder="0000" autocomplete="one-time-code" />
         </div>
         <p id="pin-error" class="form-hint is-error" hidden></p>
         <div class="form-actions">
@@ -880,7 +889,7 @@
           </div>
           <div class="field">
             <span>Novo PIN (4-6 dígitos)</span>
-            <input id="pin-reset-new" type="text" maxlength="6" inputmode="numeric" placeholder="0000" autocomplete="new-password" />
+            <input id="pin-reset-new" type="text" maxlength="8" inputmode="numeric" placeholder="0000" autocomplete="new-password" />
           </div>
           <p id="pin-reset-error" class="form-hint is-error" hidden></p>
           <div class="form-actions">
@@ -906,7 +915,7 @@
         <p>Deseja proteger este prontuário com um PIN individual antes de atender o próximo paciente?</p>
         <div class="field">
           <span>PIN opcional (4-6 dígitos)</span>
-          <input id="lock-pin-input" type="password" maxlength="6" minlength="4" inputmode="numeric" placeholder="Deixe em branco para não proteger" autocomplete="new-password" />
+          <input id="lock-pin-input" type="password" maxlength="8" minlength="4" inputmode="numeric" placeholder="Deixe em branco para não proteger" autocomplete="new-password" />
         </div>
         <p class="form-hint">O PIN será solicitado na próxima vez que este paciente for aberto.</p>
         <div class="form-actions">
@@ -1197,6 +1206,42 @@
     </div>
   </div>
 
+  <!-- Dedicado com amor a Heitor -->
+  <section id="about-modal" class="modal" hidden aria-hidden="true" data-inspiration="Heitor">
+    <div class="modal-backdrop" data-close-about></div>
+    <div class="modal-window about-modal" role="dialog" aria-modal="true" aria-labelledby="about-title" tabindex="-1">
+      <header class="modal-head about-head">
+        <div class="about-brand">
+          <button id="about-logo" class="about-logo" type="button" title="DermaMetric" aria-label="Logotipo do DermaMetric">
+            <img src="/static/favicon.svg" alt="" width="44" height="44" />
+          </button>
+          <div>
+            <span class="eyebrow">DermaMetric · Fotogrametria clínica</span>
+            <h2 id="about-title">Sobre o DermaMetric</h2>
+          </div>
+        </div>
+        <button class="icon-btn" type="button" data-close-about title="Fechar" aria-label="Fechar a tela Sobre">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
+        </button>
+      </header>
+      <div class="about-scroll">
+        <article class="about-letter">
+          <p class="about-salutation">Carta institucional</p>
+          <p>O DermaMetric nasceu da convicção de que a avaliação dermatológica e estética merece ferramentas precisas, acessíveis e respeitosas com a privacidade de cada paciente.</p>
+          <p>Idealizado inicialmente para auxiliar as pesquisas clínicas da <strong>Dra. Isabela Sousa</strong>, o projeto evoluiu para se tornar uma plataforma completa de análise morfométrica cutânea em 2D — permitindo calibração física rigorosa, alinhamento temporal entre sessões, segmentação objetiva de linhas e rugas e emissão de laudos técnicos padronizados, sem depender de equipamentos proprietários fechados ou conexão constante com a internet.</p>
+          <p>Cada detalhe da arquitetura foi pensado para o cotidiano do consultório e da pesquisa científica: funcionamento 100% local, criptografia de ponta a ponta dos registros clínicos e portabilidade segura de casos por meio de PIN individual.</p>
+          <p>Com dedicação à ciência, à clínica e à engenharia de software livre,</p>
+          <footer class="about-signature">
+            <span class="about-signature-name">joaomaxdev</span>
+            <span class="about-signature-role">— Idealização e Desenvolvimento · DermaMetric</span>
+            <a href="https://github.com/joaomaxdev/dermametric" target="_blank" rel="noopener noreferrer">github.com/joaomaxdev/dermametric</a>
+          </footer>
+          <p id="about-dedication" class="about-dedication" hidden>Dedicado ao meu filho Heitor — minha maior inspiração.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
   <!-- Modal seguro para exportar caso individual (.dmbak) -->
   <div id="export-case-modal" class="modal" hidden aria-hidden="true">
     <div class="modal-backdrop" data-close-export-case></div>
@@ -1212,24 +1257,20 @@
       </header>
       <div class="modal-body">
         <form id="export-case-form" class="form-stack" novalidate>
-          <p class="form-hint" id="export-case-desc">Informe a senha mestra da estação para cifrar o pacote do prontuário.</p>
+          <p class="form-hint" id="export-case-desc">Informe a senha mestra da estação e o PIN do caso. O arquivo é cifrado apenas com o PIN.</p>
           <div class="field">
             <span>Senha mestra da estação</span>
             <input id="export-case-password" type="password" autocomplete="current-password" placeholder="Digite a senha mestra" />
           </div>
-          <label class="case-check" for="export-case-custom-password">
-            <input id="export-case-custom-password" type="checkbox" />
-            <span>Definir uma senha específica para abrir este arquivo (.dmbak)</span>
-          </label>
-          <div class="field" id="export-case-file-password-field" hidden>
-            <span>Senha do arquivo do caso</span>
+          <div class="field">
+            <span id="export-case-pin-label">PIN do caso (4 a 8 dígitos)</span>
             <div class="case-password-row">
-              <input id="export-case-file-password" type="password" autocomplete="new-password" placeholder="Mínimo 6 caracteres" />
-              <button type="button" class="icon-btn case-password-toggle" id="export-case-file-password-toggle" title="Mostrar senha" aria-label="Mostrar senha" aria-pressed="false">
+              <input id="export-case-pin" type="password" autocomplete="off" inputmode="numeric" maxlength="8" minlength="4" placeholder="••••" />
+              <button type="button" class="icon-btn case-password-toggle" id="export-case-pin-toggle" title="Mostrar PIN" aria-label="Mostrar PIN" aria-pressed="false">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>
               </button>
             </div>
-            <small>Ideal para enviar o caso a outro profissional sem revelar a senha mestra da clínica. Quem receber precisará desta senha para abrir o arquivo.</small>
+            <small id="export-case-pin-hint">O arquivo só poderá ser importado com este PIN. A senha mestra nunca é usada para cifrar o pacote do caso.</small>
           </div>
           <p id="export-case-error" class="form-hint is-error" hidden></p>
           <div class="form-actions">

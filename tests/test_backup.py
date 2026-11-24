@@ -41,6 +41,8 @@ from backend.main import app  # noqa: E402
 
 PASSWORD = "senha-mestra-backup-1"
 ARCHIVE_PASSWORD = "senha-do-pacote-selecionado-1"
+CASE_PIN = "4821"
+OTHER_PIN = "741963"
 BACKUP_MAGIC = b"DMBAK\x01\x00\x00"
 MEDIA_TYPE = "application/vnd.dermametric.backup"
 
@@ -128,21 +130,28 @@ def measured_case(client, headers, code: str, name: str) -> dict:
     return patient
 
 
-def export_file(client, headers, patient_id: str | None = None):
+def export_file(client, headers, patient_id: str | None = None, pin: str | None = None):
+    body = {"password": PASSWORD}
+    if patient_id is not None:
+        body["patient_id"] = patient_id
+        body["pin"] = pin if pin is not None else CASE_PIN
     response = client.post(
         "/api/backup/export",
-        json={"password": PASSWORD, "patient_id": patient_id},
+        json=body,
         headers=headers,
     )
     assert response.status_code == 200, response.text
     return response
 
 
-def inspect_file(client, headers, content: bytes, password: str = PASSWORD):
+def inspect_file(client, headers, content: bytes, password: str = PASSWORD, case_pin: str = ""):
+    data = {"password": password} if password else {}
+    if case_pin:
+        data = {"case_pin": case_pin}
     return client.post(
         "/api/backup/inspect",
         files={"file": ("backup.dmbak", content, MEDIA_TYPE)},
-        data={"password": password},
+        data=data,
         headers=headers,
     )
 
@@ -154,8 +163,13 @@ def restore_file(
     mode: str,
     password: str = PASSWORD,
     import_as_new: bool = False,
+    case_pin: str = "",
 ):
-    data = {"password": password, "mode": mode}
+    data = {"mode": mode}
+    if case_pin:
+        data["case_pin"] = case_pin
+    else:
+        data["password"] = password
     if import_as_new:
         data["import_as_new"] = "true"
     return client.post(
@@ -235,32 +249,48 @@ def test_individual_patient_backup(station):
     assert 'filename="DermaMetric-Caso-PAC-INDIV1-' in disposition
     assert disposition.endswith('.dmbak"')
 
-    parsed = backup.read_backup(response.content, PASSWORD)
+    parsed = backup.read_case_backup(response.content, CASE_PIN)
     assert parsed["manifest"]["mode"] == "patient"
     assert parsed["manifest"]["patient_code"] == "PAC-INDIV1"
     assert parsed["manifest"]["patient_codes"] == ["PAC-INDIV1"]
     assert parsed["manifest"]["counts"]["patients"] == 1
+    assert parsed["manifest"]["protection"] == "case_pin"
+    assert parsed["manifest"]["encryption"]["case_pin"] is True
     assert len(parsed["records"]["patients"]) == 1
 
-    summary = inspect_file(client, headers, response.content).json()
+    # A senha mestra da estação não abre o pacote protegido pelo PIN.
+    with pytest.raises(backup.BackupPasswordError):
+        backup.read_backup(response.content, PASSWORD)
+    with pytest.raises(backup.BackupPINError):
+        backup.read_case_backup(response.content, "0000")
+
+    summary = inspect_file(client, headers, response.content, password="", case_pin=CASE_PIN).json()
     assert summary["mode"] == "patient"
     assert summary["patient_code"] == "PAC-INDIV1"
     assert summary["patient_codes"] == ["PAC-INDIV1"]
+    assert summary["protection"] == "case_pin"
 
 
-def test_single_case_backup_with_dedicated_archive_password(station):
-    """Caso único pode ser enviado a outro profissional com senha própria."""
+def test_single_case_backup_is_encrypted_with_the_case_pin(station):
+    """Caso único sai cifrado pelo PIN, não pela senha mestra da estação."""
     client, headers = station
     target = measured_case(client, headers, "PAC-CASE01", "Helena Duarte")
     measured_case(client, headers, "PAC-CASE02", "Não vai no arquivo")
+    assert target["has_pin"] is False
 
+    # Sem PIN informado, a exportação de caso é recusada.
+    missing = client.post(
+        "/api/backup/export",
+        json={"password": PASSWORD, "patient_id": target["id"]},
+        headers=headers,
+    )
+    assert missing.status_code == 400
+    assert "PIN do caso" in missing.json()["detail"]
+
+    # Definir o PIN no ato da exportação também protege o prontuário local.
     response = client.post(
         "/api/backup/export",
-        json={
-            "password": PASSWORD,
-            "patient_id": target["id"],
-            "archive_password": ARCHIVE_PASSWORD,
-        },
+        json={"password": PASSWORD, "patient_id": target["id"], "pin": CASE_PIN},
         headers=headers,
     )
     assert response.status_code == 200, response.text
@@ -268,22 +298,60 @@ def test_single_case_backup_with_dedicated_archive_password(station):
     disposition = response.headers["content-disposition"]
     assert 'filename="DermaMetric-Caso-PAC-CASE01-' in disposition
 
-    parsed = backup.read_backup(content, ARCHIVE_PASSWORD)
+    locked = client.get(f"/api/patients/{target['id']}", headers=headers).json()
+    assert locked["has_pin"] is True
+
+    # Exportar novamente exige confirmar o PIN já cadastrado.
+    refused = client.post(
+        "/api/backup/export",
+        json={"password": PASSWORD, "patient_id": target["id"], "pin": OTHER_PIN},
+        headers=headers,
+    )
+    assert refused.status_code == 401
+    assert refused.json()["detail"] == "PIN do caso incorreto."
+    again = client.post(
+        "/api/backup/export",
+        json={"password": PASSWORD, "patient_id": target["id"], "pin": CASE_PIN},
+        headers=headers,
+    )
+    assert again.status_code == 200, again.text
+
+    parsed = backup.read_case_backup(content, CASE_PIN)
     manifest = parsed["manifest"]
     assert manifest["mode"] == "patient"
     assert manifest["patient_code"] == "PAC-CASE01"
     assert manifest["patient_codes"] == ["PAC-CASE01"]
     assert manifest["counts"]["patients"] == 1
+    assert manifest["protection"] == "case_pin"
+    assert parsed["records"]["patients"][0]["pin"]["pin_hash"]
     assert [p["code"] for p in parsed["records"]["patients"]] == ["PAC-CASE01"]
 
-    # A senha mestra não abre um envelope protegido pela senha do caso.
+    # Nem a senha mestra nem um PIN errado abrem o envelope.
     with pytest.raises(backup.BackupPasswordError):
         backup.read_backup(content, PASSWORD)
+    with pytest.raises(backup.BackupPINError):
+        backup.read_case_backup(content, OTHER_PIN)
 
-    inspected = inspect_file(client, headers, content, password=ARCHIVE_PASSWORD).json()
-    assert inspected["mode"] == "patient"
-    assert inspected["patient_code"] == "PAC-CASE01"
-    assert inspected["conflicts"] == ["PAC-CASE01"]
+    wrong = client.post(
+        "/api/backup/inspect",
+        files={"file": ("caso.dmbak", content, MEDIA_TYPE)},
+        data={"case_pin": OTHER_PIN},
+        headers=headers,
+    )
+    assert wrong.status_code == 401
+    assert wrong.json()["detail"] == "PIN do caso incorreto."
+
+    inspected = client.post(
+        "/api/backup/inspect",
+        files={"file": ("caso.dmbak", content, MEDIA_TYPE)},
+        data={"case_pin": CASE_PIN},
+        headers=headers,
+    )
+    assert inspected.status_code == 200, inspected.text
+    body = inspected.json()
+    assert body["mode"] == "patient"
+    assert body["patient_code"] == "PAC-CASE01"
+    assert body["conflicts"] == ["PAC-CASE01"]
 
     # Importando como novo, o caso de outro profissional não sobrescreve o local.
     restored = restore_file(
@@ -291,13 +359,14 @@ def test_single_case_backup_with_dedicated_archive_password(station):
         headers,
         content,
         "merge",
-        password=ARCHIVE_PASSWORD,
+        case_pin=CASE_PIN,
         import_as_new=True,
     )
     assert restored.status_code == 200, restored.text
     body = restored.json()
     assert body["source_mode"] == "patient"
     assert body["source_patient_code"] == "PAC-CASE01"
+    assert body["case_pin"] is True
     assert body["import_as_new"] is True
     assert body["patients"] == 1
     assert body["patients_merged"] == 0
@@ -320,13 +389,105 @@ def test_merge_single_case_without_import_as_new_merges_local(station):
     target = measured_case(client, headers, "PAC-MERGE1", "Paciente Local")
     response = export_file(client, headers, patient_id=target["id"])
 
-    restored = restore_file(client, headers, response.content, "merge")
+    restored = restore_file(client, headers, response.content, "merge", case_pin=CASE_PIN)
     assert restored.status_code == 200, restored.text
     body = restored.json()
     assert body["patients_merged"] == 1
     assert body["patients"] == 0
     assert body["imported_patients"][0]["status"] == "merged"
     assert len(client.get("/api/patients").json()["patients"]) == 1
+
+
+def test_case_pin_import_on_another_station_uses_only_the_pin(
+    station, tmp_path, monkeypatch
+):
+    """Caso exportado numa estação importa em outra só com o PIN do caso."""
+    client, headers = station
+    target = measured_case(client, headers, "PAC-XSTN01", "Paciente Inter")
+    content = export_file(client, headers, patient_id=target["id"]).content
+    parsed = backup.read_case_backup(content, CASE_PIN)
+    patient_record = parsed["records"]["patients"][0]
+    image_relative = patient_record["sessions"][0]["clean_image_path"]
+    blob_name = f"{backup.BLOB_PREFIX}{image_relative}"
+    plain_image = parsed["blobs"][blob_name]
+
+    # Segunda estação: storage/DEK/senha mestra completamente diferentes.
+    stor2 = tmp_path / "station2" / "storage"
+    data2 = tmp_path / "station2" / "data"
+    for directory in (stor2, data2, stor2 / "uploads", stor2 / "processed"):
+        directory.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(db, "DB_PATH", stor2 / "dermametric.db")
+    monkeypatch.setattr(db, "DATA_DIR", data2)
+    monkeypatch.setattr(db, "STORAGE_DIR", stor2)
+    monkeypatch.setattr(db, "UPLOAD_DIR", stor2 / "uploads")
+    monkeypatch.setattr(db, "PROCESSED_DIR", stor2 / "processed")
+    monkeypatch.setattr(db, "WORK_DIR", stor2 / "work")
+    monkeypatch.setattr(security, "STORAGE_DIR", stor2)
+    monkeypatch.setattr(security, "KEY_PATH", stor2 / ".secret.key")
+    monkeypatch.setattr(security, "_fernet", None)
+    monkeypatch.setattr(security, "_cached_key", None)
+    db.init_db()
+
+    with TestClient(app) as second:
+        setup = second.post(
+            "/api/auth/setup", params={"password": "outra-senha-mestra-2026"}
+        )
+        assert setup.status_code == 200, setup.text
+        h2 = {"Authorization": f"Bearer {setup.json()['access_token']}"}
+
+        wrong = second.post(
+            "/api/backup/restore",
+            files={"file": ("caso.dmbak", content, MEDIA_TYPE)},
+            data={"case_pin": "0000", "mode": "merge"},
+            headers=h2,
+        )
+        assert wrong.status_code == 401
+        assert wrong.json()["detail"] == "PIN do caso incorreto."
+
+        # A senha mestra da estação de destino não decifra o pacote.
+        with_master = second.post(
+            "/api/backup/restore",
+            files={"file": ("caso.dmbak", content, MEDIA_TYPE)},
+            data={"password": "outra-senha-mestra-2026", "mode": "merge"},
+            headers=h2,
+        )
+        assert with_master.status_code == 401
+
+        restored = second.post(
+            "/api/backup/restore",
+            files={"file": ("caso.dmbak", content, MEDIA_TYPE)},
+            data={"case_pin": CASE_PIN, "mode": "merge", "import_as_new": "true"},
+            headers=h2,
+        )
+        assert restored.status_code == 200, restored.text
+        body = restored.json()
+        assert body["patients"] == 1
+        assert body["case_pin"] is True
+        assert body["imported_patients"][0]["patient_code"] == "PAC-XSTN01"
+
+        # O prontuário importado abre com os dados originais na nova estação.
+        listed = second.get("/api/patients", headers=h2).json()["patients"]
+        assert [p["code"] for p in listed] == ["PAC-XSTN01"]
+        detail = second.get(f"/api/patients/{listed[0]['id']}", headers=h2).json()
+        session = detail["sessions"][0]
+        assert session["measurements"][0]["stria_code"] == "L1"
+        served = second.get(session["clean_image_url"])
+        assert served.status_code == 200
+        assert served.content.startswith(b"\x89PNG")
+
+        # A imagem foi recifrada com a DEK local (bytes diferentes do envelope).
+        stored_path = db.storage_absolute(image_relative)
+        assert stored_path is not None and stored_path.exists()
+        stored = stored_path.read_bytes()
+        assert stored != plain_image
+        assert security.decrypt_bytes(stored) == plain_image
+
+        # Dados sensíveis também ficaram cifrados com a chave da nova estação.
+        with db.connection() as conn:
+            row = conn.execute(
+                "SELECT name FROM patients WHERE code = 'PAC-XSTN01'"
+            ).fetchone()
+        assert row["name"].startswith("enc:v1:")
 
 
 def test_selected_patients_backup_with_dedicated_password_and_merge_restore(station):

@@ -27,6 +27,7 @@ import hashlib
 import hmac
 import io
 import json
+import re
 import secrets
 import struct
 import zipfile
@@ -48,6 +49,12 @@ SALT_LEN = 16
 CHECK_LEN = 8
 TAG_LEN = 32
 PBKDF2_ITERATIONS = 200_000
+# PINs de 4 a 8 dígitos têm entropia baixa: o envelope do caso usa mais
+# iterações e um prefixo de domínio para não reutilizar a derivação da senha
+# mestra em outro contexto.
+CASE_PBKDF2_ITERATIONS = 600_000
+CASE_PIN_RE = re.compile(r"^\d{4,8}$")
+CASE_KEY_PREFIX = "dmbak-case-pin:v1:"
 
 # magic + salt + iterations + checker + payload_len
 _HEADER_PREFIX_LEN = 8 + SALT_LEN + 4 + CHECK_LEN + 8
@@ -86,6 +93,18 @@ class BackupPasswordError(PermissionError):
     """Senha mestra incorreta para o arquivo informado."""
 
 
+class BackupPINError(PermissionError):
+    """PIN do caso ausente, fora do formato ou incorreto."""
+
+
+def normalize_case_pin(pin: Any) -> str:
+    """Valida o PIN do caso (4 a 8 dígitos numéricos)."""
+    value = str(pin or "").strip()
+    if not CASE_PIN_RE.match(value):
+        raise BackupPINError("O PIN do caso deve ter de 4 a 8 dígitos numéricos.")
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Criptografia do envelope
 # ---------------------------------------------------------------------------
@@ -102,17 +121,19 @@ def _password_check(mac_key: bytes) -> bytes:
     return hashlib.sha256(mac_key + b"dmbak-password-check").digest()[:CHECK_LEN]
 
 
-def encrypt_backup_bytes(payload: bytes, password: str) -> bytes:
+def encrypt_backup_bytes(
+    payload: bytes, password: str, iterations: int = PBKDF2_ITERATIONS
+) -> bytes:
     """Encapsula o ZIP ``payload`` no envelope ``.dmbak`` autenticado."""
     if not password:
         raise BackupPasswordError("Informe a senha mestra para cifrar o backup.")
     salt = secrets.token_bytes(SALT_LEN)
-    fernet_key, mac_key = _derive_material(password, salt, PBKDF2_ITERATIONS)
+    fernet_key, mac_key = _derive_material(password, salt, iterations)
     cipher = Fernet(fernet_key).encrypt(payload)
     prefix = (
         MAGIC
         + salt
-        + struct.pack(">I", PBKDF2_ITERATIONS)
+        + struct.pack(">I", iterations)
         + _password_check(mac_key)
         + struct.pack(">Q", len(cipher))
     )
@@ -158,6 +179,28 @@ def decrypt_backup_bytes(data: bytes, password: str) -> bytes:
         return Fernet(fernet_key).decrypt(cipher)
     except InvalidToken as exc:  # pragma: no cover - HMAC já cobre este caso
         raise BackupError("Não foi possível decifrar o backup.") from exc
+
+
+def _case_envelope_password(pin: str) -> str:
+    """Deriva o segredo do envelope a partir do PIN, com domínio próprio."""
+    return f"{CASE_KEY_PREFIX}{pin}"
+
+
+def encrypt_case_bytes(payload: bytes, pin: str) -> bytes:
+    """Cifra o pacote de um caso com chave derivada do PIN (PBKDF2 + Fernet)."""
+    value = normalize_case_pin(pin)
+    return encrypt_backup_bytes(
+        payload, _case_envelope_password(value), iterations=CASE_PBKDF2_ITERATIONS
+    )
+
+
+def decrypt_case_bytes(data: bytes, pin: str) -> bytes:
+    """Decifra um pacote de caso; PIN errado vira ``BackupPINError``."""
+    value = normalize_case_pin(pin)
+    try:
+        return decrypt_backup_bytes(data, _case_envelope_password(value))
+    except BackupPasswordError as exc:
+        raise BackupPINError("PIN do caso incorreto.") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -221,10 +264,10 @@ def _session_record(conn, session: dict[str, Any]) -> dict[str, Any]:
         "healthy_skin_roi": session.get("healthy_skin_roi"),
         "lesion_labels": session.get("lesion_labels"),
         "clinical_scales": session.get("clinical_scales"),
-        "clean_image_path": session.get("clean_image_path"),
-        "ruler_image_path": session.get("ruler_image_path"),
-        "aligned_image_path": session.get("aligned_image_path"),
-        "enhanced_image_path": session.get("enhanced_image_path"),
+        "clean_image_path": db.normalize_storage_path(session.get("clean_image_path")),
+        "ruler_image_path": db.normalize_storage_path(session.get("ruler_image_path")),
+        "aligned_image_path": db.normalize_storage_path(session.get("aligned_image_path")),
+        "enhanced_image_path": db.normalize_storage_path(session.get("enhanced_image_path")),
         "updated_at": session.get("updated_at"),
         "measurements": [
             _measurement_record(m) for m in (session.get("measurements") or [])
@@ -319,7 +362,7 @@ def _collect_blobs(records: dict[str, Any]) -> dict[str, bytes]:
     for patient in records.get("patients") or []:
         for session in patient.get("sessions") or []:
             for field in _IMAGE_FIELDS:
-                relative = session.get(field)
+                relative = db.normalize_storage_path(session.get(field))
                 if not relative or relative in blobs:
                     continue
                 absolute = db.storage_absolute(relative)
@@ -335,7 +378,11 @@ def _collect_blobs(records: dict[str, Any]) -> dict[str, bytes]:
 
 
 def _build_payload(
-    records: dict[str, Any], blobs: dict[str, bytes], professional: dict[str, str]
+    records: dict[str, Any],
+    blobs: dict[str, bytes],
+    professional: dict[str, str],
+    protection: str = "master_password",
+    iterations: int = PBKDF2_ITERATIONS,
 ) -> tuple[bytes, dict[str, Any]]:
     records_bytes = json.dumps(
         records, ensure_ascii=False, separators=(",", ":"), sort_keys=True
@@ -378,11 +425,13 @@ def _build_payload(
             "blobs": len(blob_items),
         },
         "checksums": checksums,
+        "protection": protection,
         "encryption": {
             "payload": "fernet-aes256",
             "kdf": "pbkdf2_sha256",
-            "iterations": PBKDF2_ITERATIONS,
+            "iterations": iterations,
             "integrity": "hmac_sha256",
+            "case_pin": protection == "case_pin",
         },
     }
     if records["mode"] == "selected":
@@ -426,7 +475,18 @@ def export_backup(
     """
     records = collect_records(patient_id, patient_ids=patient_ids)
     blobs = _collect_blobs(records)
-    payload, manifest = _build_payload(records, blobs, db.get_profile())
+    protection = (
+        "archive_password"
+        if str(archive_password or "").strip()
+        else "master_password"
+    )
+    payload, manifest = _build_payload(
+        records,
+        blobs,
+        db.get_profile(),
+        protection=protection,
+        iterations=PBKDF2_ITERATIONS,
+    )
     envelope_password = str(archive_password or "").strip() or password
     data = encrypt_backup_bytes(payload, envelope_password)
     summary = {
@@ -435,6 +495,7 @@ def export_backup(
         "patient_codes": manifest["patient_codes"],
         "counts": manifest["counts"],
         "size_bytes": len(data),
+        "protection": protection,
         "has_archive_password": bool(
             str(archive_password or "").strip()
             and str(archive_password).strip() != password
@@ -442,6 +503,46 @@ def export_backup(
     }
     if records["mode"] == "selected":
         summary["selected_count"] = manifest.get("selected_count", len(records["patients"]))
+    return data, summary
+
+
+def export_case_backup(patient_id: str, pin: str) -> tuple[bytes, dict[str, Any]]:
+    """Exporta um caso único cifrado com chave derivada do PIN do prontuário.
+
+    Se o paciente já possui PIN, ele é apenas *confirmado*; se ainda não
+    possui, o PIN informado (4 a 8 dígitos) passa a proteger o prontuário e é
+    gravado localmente, mantendo o caso consistente entre estações.
+    """
+    pin_value = normalize_case_pin(pin)
+    patient = db.get_patient(patient_id)
+    if patient is None:
+        raise LookupError("Paciente não encontrado para o backup.")
+    pin_defined = not bool(patient.get("has_pin"))
+    if not pin_defined and not db.verify_patient_pin(patient_id, pin_value):
+        raise BackupPINError("PIN do caso incorreto.")
+    if pin_defined:
+        db.set_patient_pin(patient_id, pin_value)
+
+    records = collect_records(patient_id=patient_id)
+    blobs = _collect_blobs(records)
+    payload, manifest = _build_payload(
+        records,
+        blobs,
+        db.get_profile(),
+        protection="case_pin",
+        iterations=CASE_PBKDF2_ITERATIONS,
+    )
+    data = encrypt_case_bytes(payload, pin_value)
+    summary = {
+        "mode": records["mode"],
+        "created_at": manifest["created_at"],
+        "patient_codes": manifest["patient_codes"],
+        "counts": manifest["counts"],
+        "size_bytes": len(data),
+        "protection": "case_pin",
+        "case_pin": True,
+        "pin_defined_now": pin_defined,
+    }
     return data, summary
 
 
@@ -470,7 +571,16 @@ def backup_filename(summary: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 def read_backup(data: bytes, password: str) -> dict[str, Any]:
     """Decifra e valida integralmente um ``.dmbak`` sem tocar no banco."""
-    payload = decrypt_backup_bytes(data, password)
+    return _parse_payload(decrypt_backup_bytes(data, password))
+
+
+def read_case_backup(data: bytes, pin: str) -> dict[str, Any]:
+    """Decifra e valida um pacote de caso protegido por PIN."""
+    return _parse_payload(decrypt_case_bytes(data, pin))
+
+
+def _parse_payload(payload: bytes) -> dict[str, Any]:
+    """Valida checksums/manifesto do ZIP interno já decifrado."""
     try:
         archive = zipfile.ZipFile(io.BytesIO(payload))
     except zipfile.BadZipFile as exc:
@@ -524,7 +634,15 @@ def _local_codes() -> set[str]:
 
 def inspect_backup(data: bytes, password: str) -> dict[str, Any]:
     """Resumo do conteúdo do arquivo, sem qualquer alteração no banco."""
-    parsed = read_backup(data, password)
+    return _inspect_parsed(read_backup(data, password), len(data))
+
+
+def inspect_case_backup(data: bytes, pin: str) -> dict[str, Any]:
+    """Resumo de um pacote de caso protegido por PIN."""
+    return _inspect_parsed(read_case_backup(data, pin), len(data))
+
+
+def _inspect_parsed(parsed: dict[str, Any], size_bytes: int) -> dict[str, Any]:
     manifest = parsed["manifest"]
     records = parsed["records"]
     codes = [
@@ -546,7 +664,9 @@ def inspect_backup(data: bytes, password: str) -> dict[str, Any]:
         "conflicts": conflicts,
         "has_conflicts": bool(conflicts),
         "encryption": manifest.get("encryption") or {},
-        "size_bytes": len(data),
+        "protection": manifest.get("protection") or "master_password",
+        "case_pin": bool((manifest.get("encryption") or {}).get("case_pin")),
+        "size_bytes": size_bytes,
     }
     if manifest.get("mode") == "selected":
         result["selected_count"] = manifest.get("selected_count", len(codes))
@@ -627,10 +747,10 @@ def _insert_session(conn, session: dict[str, Any], patient_id: str) -> None:
             _encrypt_json(session.get("ruler_points")),
             _encrypt_json(session.get("landmarks")),
             _encrypt_json(session.get("healthy_skin_roi")),
-            session.get("aligned_image_path"),
-            session.get("enhanced_image_path"),
-            session.get("ruler_image_path"),
-            session.get("clean_image_path"),
+            db.normalize_storage_path(session.get("aligned_image_path")),
+            db.normalize_storage_path(session.get("enhanced_image_path")),
+            db.normalize_storage_path(session.get("ruler_image_path")),
+            db.normalize_storage_path(session.get("clean_image_path")),
             _encrypt_json(session.get("lesion_labels")),
             _encrypt_json(session.get("clinical_scales")),
             session.get("updated_at") or now,
@@ -706,7 +826,7 @@ def _merge_session(
     for field in _IMAGE_FIELDS:
         if existing_row.get(field) or not session.get(field):
             continue
-        updates.append((field, session.get(field)))
+        updates.append((field, db.normalize_storage_path(session.get(field))))
     if not existing_row.get("px_per_mm") and session.get("px_per_mm"):
         updates.append(("px_per_mm", float(session.get("px_per_mm"))))
     if updates:
@@ -762,7 +882,7 @@ def _patient_blob_count(patient: dict[str, Any], blob_relatives: set[str]) -> in
     seen: set[str] = set()
     for session in patient.get("sessions") or []:
         for field in _IMAGE_FIELDS:
-            relative = session.get(field)
+            relative = db.normalize_storage_path(session.get(field))
             if not relative or relative in seen:
                 continue
             seen.add(str(relative))
@@ -949,16 +1069,55 @@ def restore_backup(
     origem já existe, cria um prontuário novo (novo ``PAC-XXXXXX``) em vez de
     mesclar no prontuário local.
     """
+    payload = decrypt_backup_bytes(data, password)
+    return _restore_payload(
+        payload,
+        password,
+        mode,
+        import_as_new,
+        protection_label="Senha mestra",
+        protection="master_password",
+    )
+
+
+def restore_case_backup(
+    data: bytes,
+    pin: str,
+    mode: str = "merge",
+    import_as_new: bool = False,
+) -> dict[str, Any]:
+    """Importa um caso protegido por PIN, recifrando com a DEK local."""
+    pin_value = normalize_case_pin(pin)
+    payload = decrypt_case_bytes(data, pin_value)
+    return _restore_payload(
+        payload,
+        pin_value,
+        mode,
+        import_as_new,
+        protection_label="PIN do caso",
+        protection="case_pin",
+    )
+
+
+def _restore_payload(
+    payload: bytes,
+    envelope_password: str,
+    mode: str,
+    import_as_new: bool,
+    *,
+    protection_label: str,
+    protection: str,
+) -> dict[str, Any]:
     if mode not in {"merge", "replace"}:
         raise BackupError("Modo de restauração inválido. Use 'merge' ou 'replace'.")
-    parsed = read_backup(data, password)
+    parsed = _parse_payload(payload)
     records = parsed["records"]
     manifest = parsed["manifest"]
     version = manifest.get("format_version") or FORMAT_VERSION
     source_counts = manifest.get("counts") or {}
     logs: list[str] = [
         f"Assinatura DMBAK v{version} validada",
-        "Senha mestra e integridade HMAC-SHA256 confirmadas",
+        f"{protection_label} e integridade HMAC-SHA256 confirmadas",
         (
             f"Backup contém {source_counts.get('patients', 0)} paciente(s), "
             f"{source_counts.get('sessions', 0)} sessão(ões) e "
@@ -978,7 +1137,7 @@ def restore_backup(
 
     # Snapshot automático do estado atual antes de qualquer gravação.
     logs.append("Criando snapshot preventivo do banco atual…")
-    snapshot_bytes, _ = export_backup(password)
+    snapshot_bytes, _ = export_backup(envelope_password)
     # ``db.DATA_DIR`` deriva de ``backend.paths.DATA_DIR`` (perfil do usuário
     # quando empacotado), mantendo os snapshots junto aos dados persistentes.
     backup_dir = db.DATA_DIR / "backups"
@@ -1049,6 +1208,8 @@ def restore_backup(
         "source_created_at": manifest.get("created_at"),
         "source_mode": manifest.get("mode"),
         "source_patient_code": manifest.get("patient_code"),
+        "protection": protection,
+        "case_pin": protection == "case_pin",
         "import_as_new": bool(import_as_new),
         "patient_codes": manifest.get("patient_codes") or [],
         "imported_patients": imported,

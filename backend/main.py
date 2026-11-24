@@ -1097,7 +1097,7 @@ def patient_lock(patient_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     pin = str(payload.get("pin") or "").strip()
     if pin and not auth.PIN_RE.match(pin):
         raise HTTPException(
-            status_code=400, detail="O PIN deve ter de 4 a 6 dígitos numéricos."
+            status_code=400, detail="O PIN deve ter de 4 a 8 dígitos numéricos."
         )
     db.set_patient_pin(patient_id, pin or None)
     patient = db.get_patient(patient_id)
@@ -1302,6 +1302,8 @@ MAX_BACKUP_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
 
 def _backup_error(exc: Exception) -> HTTPException:
     """Converte falhas do envelope .dmbak em respostas HTTP seguras."""
+    if isinstance(exc, backup_mod.BackupPINError):
+        return HTTPException(status_code=401, detail=str(exc))
     if isinstance(exc, backup_mod.BackupPasswordError):
         return HTTPException(status_code=401, detail=str(exc))
     if isinstance(exc, backup_mod.BackupError):
@@ -1362,13 +1364,30 @@ def backup_export(payload: dict[str, Any], request: Request) -> Response:
         if not archive_password.strip():
             archive_password = None
 
+    case_pin = str(payload.get("pin") or payload.get("case_pin") or "").strip()
+
     try:
-        data, summary = backup_mod.export_backup(
-            password,
-            patient_id=patient_id,
-            patient_ids=patient_ids,
-            archive_password=archive_password,
-        )
+        if patient_id:
+            # Caso único: o envelope é sempre protegido pelo PIN do caso, e não
+            # pela senha mestra da estação de origem.
+            if not case_pin:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Informe o PIN do caso (4 a 8 dígitos) para proteger o "
+                        "arquivo exportado."
+                    ),
+                )
+            data, summary = backup_mod.export_case_backup(patient_id, case_pin)
+        else:
+            data, summary = backup_mod.export_backup(
+                password,
+                patient_id=None,
+                patient_ids=patient_ids,
+                archive_password=archive_password,
+            )
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001 - mapeado para HTTP
         raise _backup_error(exc) from exc
 
@@ -1387,14 +1406,26 @@ def backup_export(payload: dict[str, Any], request: Request) -> Response:
 async def backup_inspect(
     request: Request,
     file: UploadFile = File(...),
-    password: str = Form(...),
+    password: str = Form(""),
+    case_pin: str = Form(""),
+    pin: str = Form(""),
 ) -> dict[str, Any]:
-    """Valida e resume um ``.dmbak`` sem alterar o banco de dados."""
+    """Valida e resume um ``.dmbak`` sem alterar o banco de dados.
+
+    ``case_pin`` (ou ``pin``) inspeciona pacotes de caso protegidos por PIN;
+    ``password`` continua atendendo backups completos/da estação.
+    """
     _require_station_access(request)
-    if not password:
-        raise HTTPException(status_code=400, detail="Informe a senha mestra do arquivo.")
+    case_pin = (case_pin or pin or "").strip()
+    if not password and not case_pin:
+        raise HTTPException(
+            status_code=400,
+            detail="Informe a senha mestra do arquivo ou o PIN do caso.",
+        )
     data = await _read_backup_upload(file)
     try:
+        if case_pin:
+            return backup_mod.inspect_case_backup(data, case_pin)
         return backup_mod.inspect_backup(data, password)
     except Exception as exc:  # noqa: BLE001 - mapeado para HTTP
         raise _backup_error(exc) from exc
@@ -1404,28 +1435,39 @@ async def backup_inspect(
 async def backup_restore(
     request: Request,
     file: UploadFile = File(...),
-    password: str = Form(...),
+    password: str = Form(""),
+    case_pin: str = Form(""),
+    pin: str = Form(""),
     mode: str = Form("merge"),
     import_as_new: bool = Form(False),
 ) -> dict[str, Any]:
     """Restaura um ``.dmbak`` em modo ``merge`` ou ``replace``.
 
-    ``import_as_new`` só tem efeito em ``merge`` de caso único: se o código de
-    origem já existir na estação, cria um prontuário novo (``PAC-XXXXXX``) em
-    vez de mesclar no prontuário local.
+    Pacotes de caso usam ``case_pin`` (ou ``pin``); backups completos usam
+    ``password``. ``import_as_new`` só tem efeito em ``merge`` de caso único:
+    se o código de origem já existir na estação, cria um prontuário novo
+    (``PAC-XXXXXX``) em vez de mesclar no prontuário local.
 
     Um snapshot completo do estado atual é gravado automaticamente em
     ``data/backups/pre_restore_*.dmbak`` antes de qualquer escrita.
     """
     _require_station_access(request)
-    if not password:
-        raise HTTPException(status_code=400, detail="Informe a senha mestra do arquivo.")
+    case_pin = (case_pin or pin or "").strip()
+    if not password and not case_pin:
+        raise HTTPException(
+            status_code=400,
+            detail="Informe a senha mestra do arquivo ou o PIN do caso.",
+        )
     if mode not in {"merge", "replace"}:
         raise HTTPException(
             status_code=400, detail="Modo inválido: use 'merge' ou 'replace'."
         )
     data = await _read_backup_upload(file)
     try:
+        if case_pin:
+            return backup_mod.restore_case_backup(
+                data, case_pin, mode=mode, import_as_new=import_as_new
+            )
         return backup_mod.restore_backup(
             data, password, mode=mode, import_as_new=import_as_new
         )

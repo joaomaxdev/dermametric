@@ -262,7 +262,7 @@ CASE_IMPORT_IDS = {
     "case-import-drop",
     "case-import-file",
     "case-import-file-status",
-    "case-import-password",
+    "case-import-pin",
     "case-import-error",
     "case-import-validate",
     "case-import-preview",
@@ -278,10 +278,10 @@ EXPORT_CASE_IDS = {
     "export-case-modal",
     "export-case-form",
     "export-case-password",
-    "export-case-custom-password",
-    "export-case-file-password-field",
-    "export-case-file-password",
-    "export-case-file-password-toggle",
+    "export-case-pin",
+    "export-case-pin-label",
+    "export-case-pin-hint",
+    "export-case-pin-toggle",
     "export-case-error",
     "export-case-submit",
 }
@@ -310,14 +310,26 @@ def test_patient_modal_tabs_default_to_manual_form():
     assert 'value="merge"' in conflict
 
 
-def test_case_export_uses_dedicated_archive_password():
+def test_case_export_uses_the_case_pin_not_the_master_password():
     js = _js()
     request = js.split("async function requestBackupExport", 1)[1].split("\n}", 1)[0]
-    assert "archive_password" in request
+    assert "body.pin" in request
+    assert "archive_password" not in request
     submit = js.split("async function submitExportCaseBackup", 1)[1].split("\n}", 1)[0]
-    assert "export-case-custom-password" in submit
-    assert "requestBackupExport(password, patient.id, archivePassword)" in submit
+    assert "export-case-pin" in submit
+    assert "requestBackupExport(password, patient.id, casePin)" in submit
+    assert "/^\\d{4,8}$/" in submit
     assert "DermaMetric-Caso-" in js
+
+
+def test_case_import_sends_the_case_pin_and_shows_pin_errors():
+    js = _js()
+    validate = js.split("async function validateCaseImport", 1)[1].split("\n}\n", 1)[0]
+    assert 'form.append("case_pin", pin)' in validate
+    submit = js.split("async function submitCaseImport", 1)[1].split("\n}\n", 1)[0]
+    assert 'form.append("case_pin", pin)' in submit
+    assert "case-import-pin" in submit
+    assert "case-import-password" not in js
 
 
 def test_case_import_flow_contract():
@@ -343,6 +355,43 @@ def test_case_import_tab_resets_on_open_and_close():
     assert 'switchPatientTab("manual")' in open_fn
     assert "resetCaseImport()" in open_fn
     assert "resetCaseImport()" in close_fn
+
+
+# ---------------------------------------------------------------------------
+# Tela "Sobre" — carta institucional e dedicatória discreta
+# ---------------------------------------------------------------------------
+def test_about_screen_letter_content_and_credits():
+    html = _html()
+    for element_id in ("about-open", "about-modal", "about-logo", "about-title", "about-dedication"):
+        assert f'id="{element_id}"' in html, element_id
+    assert "Sobre o DermaMetric" in html
+    assert "Dra. Isabela Sousa" in html
+    assert "joaomaxdev" in html
+    assert "Idealização e Desenvolvimento · DermaMetric" in html
+    assert "https://github.com/joaomaxdev/dermametric" in html
+    assert "plataforma completa de análise morfométrica cutânea em 2D" in html
+    assert "portabilidade segura de casos por meio de PIN individual" in html
+    # Dedicatória escondida no rodapé da carta e easter egg no HTML.
+    dedication = re.search(r'<p id="about-dedication"[^>]*>', html).group(0)
+    assert "hidden" in dedication
+    assert "Dedicado ao meu filho Heitor — minha maior inspiração." in html
+    assert 'data-inspiration="Heitor"' in html
+    assert "<!-- Dedicado com amor a Heitor -->" in html
+
+
+def test_about_logo_click_easter_egg_contract():
+    js = _js()
+    fn = js.split("function onAboutLogoClick", 1)[1].split("\n}\n", 1)[0]
+    assert "aboutLogoClickCount < 5" in fn
+    assert "about-dedication" in fn
+    assert "is-visible" in fn
+    # Segundo clique depois de revelada esconde a dedicatória.
+    assert "aboutDedicationVisible" in fn
+    assert "hidden = true" in fn
+    css = _css()
+    assert ".about-dedication" in css
+    assert "transition: opacity" in css
+    assert ".about-dedication.is-visible" in css
 
 
 # ---------------------------------------------------------------------------

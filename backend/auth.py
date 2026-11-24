@@ -32,7 +32,7 @@ PIN_HASH_KEY = "dermametric.patients.pin_hash"
 ACCESS_SETUP_KEY = "dermametric.access.setup"
 PBKDF2_ITERATIONS = 120_000
 
-PIN_RE = re.compile(r"^\d{4,6}$")
+PIN_RE = re.compile(r"^\d{4,8}$")
 MIN_PASSWORD_LENGTH = 6
 
 
@@ -250,7 +250,7 @@ def reset_patient_pin(
         return {"patient_id": patient_id, "locked": False, "patient": db.get_patient(patient_id)}
     pin = str(new_pin or "").strip()
     if not PIN_RE.match(pin):
-        raise ValueError("O novo PIN deve ter de 4 a 6 dígitos numéricos.")
+        raise ValueError("O novo PIN deve ter de 4 a 8 dígitos numéricos.")
     db.set_patient_pin(patient_id, pin)
     return {"patient_id": patient_id, "locked": True, "patient": db.get_patient(patient_id)}
 
