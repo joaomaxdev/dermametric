@@ -1029,37 +1029,138 @@ def _auto_skin_ring(
     return ring
 
 
-def _auto_color_score(
-    lab: np.ndarray,
-    healthy_mean: np.ndarray,
-    healthy_std: np.ndarray,
-    mode: str,
-) -> np.ndarray:
-    """Mapa de afinidade colorimétrica à lesão, em unidades de desvio sadio."""
-    if mode not in AUTO_SEGMENT_MODES:
-        raise ValueError(f"Modo de segmentação inválido: {mode}")
+def _auto_background(channel: np.ndarray, kernel_size: int) -> np.ndarray:
+    """Fundo local suavizado (Gaussiana) de um canal CIELAB/derivado."""
+    return cv2.GaussianBlur(
+        channel.astype(np.float32), (kernel_size, kernel_size), 0
+    )
 
+
+def _auto_normalize(values: np.ndarray, region: np.ndarray) -> np.ndarray:
+    """Normaliza um mapa de contraste local para [0, 1] de forma robusta."""
+    sample = values[region > 0]
+    sample = sample[np.isfinite(sample)]
+    if sample.size < 16:
+        sample = values.reshape(-1)
+        sample = sample[np.isfinite(sample)]
+    if sample.size == 0:
+        return np.zeros_like(values, dtype=np.float32)
+    low = float(np.percentile(sample, 5))
+    high = float(np.percentile(sample, 95))
+    span = high - low
+    if span <= 1e-6:
+        scale = float(np.std(sample))
+        if scale <= 1e-6:
+            return np.zeros_like(values, dtype=np.float32)
+        return np.clip((values - low) / (scale * 3.0), 0.0, 1.0).astype(np.float32)
+    return np.clip((values - low) / span, 0.0, 1.0).astype(np.float32)
+
+
+def _auto_texture_map(lightness: np.ndarray, kernel_size: int) -> np.ndarray:
+    """Microrrelevo local: Top-Hat (cristas) + Black-Hat (sulcos) em L*."""
+    lightness_u8 = np.clip(lightness * 2.55, 0, 255).astype(np.uint8)
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
+    )
+    top_hat = cv2.morphologyEx(lightness_u8, cv2.MORPH_TOPHAT, kernel)
+    black_hat = cv2.morphologyEx(lightness_u8, cv2.MORPH_BLACKHAT, kernel)
+    texture = top_hat.astype(np.float32) + black_hat.astype(np.float32)
+    return cv2.GaussianBlur(texture, (5, 5), 0)
+
+
+def _auto_morph_background(
+    channel: np.ndarray, kernel_size: int, *, bright: bool
+) -> np.ndarray:
+    """Fundo de pele estimado por morfologia (remove a estria da amostra).
+
+    ``bright=True`` usa fechamento para estimar o entorno escuro de uma
+    estrutura clara (alba/rubra em ``L*``/``a*``). ``bright=False`` usa
+    abertura para estimar o entorno claro de uma estrutura escura (croma e
+    ``R - G``).
+    """
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
+    )
+    operation = cv2.MORPH_CLOSE if bright else cv2.MORPH_OPEN
+    return cv2.morphologyEx(channel.astype(np.float32), operation, kernel)
+
+
+def _auto_profile_maps(
+    image: np.ndarray,
+    lab: np.ndarray,
+    region: np.ndarray,
+    background_kernel: int,
+    texture_kernel: int,
+    structure_kernel: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Mapas normalizados de alba, rubra e ΔE00 local (contraste relativo)."""
     lightness = lab[..., 0]
     a_channel = lab[..., 1]
     b_channel = lab[..., 2]
     chroma = np.hypot(a_channel, b_channel)
 
-    # Piso de 1 unidade CIELAB evita amplificar ruído de pele uniforme.
-    std = np.maximum(np.asarray(healthy_std, dtype=np.float64), 1.0)
-    mean_l, mean_a, mean_b = (float(v) for v in healthy_mean)
-    mean_chroma = float(np.hypot(mean_a, mean_b))
-    std_chroma = max(float(np.hypot(std[1], std[2])), 1.0)
+    light_bg = _auto_background(lightness, background_kernel)
+    a_bg = _auto_background(a_channel, background_kernel)
+    b_bg = _auto_background(b_channel, background_kernel)
+    chroma_bg = _auto_background(chroma, background_kernel)
 
-    # Rubra: eritema (a* alto) e, secundariamente, escurecimento relativo.
-    rubra = (a_channel - mean_a) / std[1] + 0.35 * (mean_l - lightness) / std[0]
-    # Alba: clareamento (L* alto) e perda de croma (aspecto nacarado).
-    alba = (lightness - mean_l) / std[0] + 0.35 * (mean_chroma - chroma) / std_chroma
+    # Fundo morfológico: como a estria pode ser mais larga que a Gaussiana,
+    # remove a própria lesão da amostra e mede o contraste contra a pele ao
+    # redor, não contra o miolo da lesão.
+    light_skin = _auto_morph_background(lightness, structure_kernel, bright=True)
+    a_skin = _auto_morph_background(a_channel, structure_kernel, bright=True)
+    chroma_skin = _auto_morph_background(chroma, structure_kernel, bright=False)
 
-    if mode == "rubra":
-        return rubra
-    if mode == "alba":
-        return alba
-    return np.maximum(rubra, alba)
+    # Alba: clareamento local + perda de saturação + microrrelevo atrófico.
+    lightening = np.maximum(0.0, lightness - np.minimum(light_bg, light_skin))
+    desaturation = np.maximum(0.0, np.maximum(chroma_bg, chroma_skin) - chroma)
+    texture = _auto_texture_map(lightness, texture_kernel)
+    alba = (
+        0.50 * _auto_normalize(lightening, region)
+        + 0.30 * _auto_normalize(desaturation, region)
+        + 0.20 * _auto_normalize(texture, region)
+    )
+
+    # Rubra: excesso local de a* + dominância local de vermelho (R - G).
+    red = image[..., 2].astype(np.float32)
+    green = image[..., 1].astype(np.float32)
+    red_excess = red - green
+    red_bg = _auto_background(red_excess, background_kernel)
+    red_skin = _auto_morph_background(red_excess, structure_kernel, bright=False)
+    erythema = np.maximum(0.0, a_channel - np.minimum(a_bg, a_skin))
+    local_red = np.maximum(0.0, red_excess - np.maximum(red_bg, red_skin))
+    rubra = (
+        0.6 * _auto_normalize(erythema, region)
+        + 0.4 * _auto_normalize(local_red, region)
+    )
+
+    # ΔE00 local entre cada pixel e a pele imediatamente ao redor.
+    background_lab = np.stack((light_bg, a_bg, b_bg), axis=-1)
+    rx, ry, rw, rh = cv2.boundingRect(region)
+    delta_crop = delta_e_ciede2000(
+        lab[ry : ry + rh, rx : rx + rw].astype(np.float32),
+        background_lab[ry : ry + rh, rx : rx + rw].astype(np.float32),
+    )
+    delta_e = np.zeros((image.shape[0], image.shape[1]), dtype=np.float32)
+    delta_e[ry : ry + rh, rx : rx + rw] = np.asarray(delta_crop, dtype=np.float32)
+    delta_e = _auto_normalize(delta_e, region)
+
+    return (
+        np.clip(alba, 0.0, 1.0).astype(np.float32),
+        np.clip(rubra, 0.0, 1.0).astype(np.float32),
+        np.clip(delta_e, 0.0, 1.0).astype(np.float32),
+    )
+
+
+def _auto_orientation_kernel(
+    w: int, h: int, length: int, thickness: int
+) -> np.ndarray:
+    """Kernel elíptico alongado no eixo maior da caixa (une a estria)."""
+    length = _auto_odd(max(3, length))
+    thickness = _auto_odd(max(3, thickness))
+    if w >= h:
+        return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (length, thickness))
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (thickness, length))
 
 
 def _auto_largest_component(mask: np.ndarray) -> np.ndarray:
@@ -1070,10 +1171,42 @@ def _auto_largest_component(mask: np.ndarray) -> np.ndarray:
     return np.where(labels == best, 255, 0).astype(np.uint8)
 
 
+def _auto_keep_components(mask: np.ndarray, min_area: float) -> tuple[np.ndarray, int]:
+    """Mantém componentes acima de ``min_area``; devolve a máscara e a contagem."""
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    kept = np.zeros_like(mask)
+    kept_count = 0
+    for label in range(1, count):
+        if stats[label, cv2.CC_STAT_AREA] >= min_area:
+            kept[labels == label] = 255
+            kept_count += 1
+    return kept, kept_count
+
+
+def _auto_resample_polygon(points: np.ndarray, target: int) -> np.ndarray:
+    """Reamostra um polígono fechado com ``target`` vértices uniformes."""
+    pts = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+    if len(pts) < 3 or target < 3:
+        return pts
+    closed = np.vstack([pts, pts[:1]])
+    segments = np.linalg.norm(np.diff(closed, axis=0), axis=1)
+    total = float(segments.sum())
+    if total <= 1e-9:
+        return pts
+    cumulative = np.concatenate([[0.0], np.cumsum(segments)])
+    sampled = []
+    for distance in np.linspace(0.0, total, target, endpoint=False):
+        index = int(np.searchsorted(cumulative, distance, side="right") - 1)
+        index = min(max(index, 0), len(segments) - 1)
+        ratio = (distance - cumulative[index]) / max(segments[index], 1e-9)
+        sampled.append(closed[index] + ratio * (closed[index + 1] - closed[index]))
+    return np.asarray(sampled, dtype=np.float64)
+
+
 def _auto_polygon_from_mask(
     mask: np.ndarray, fallback: list[list[float]]
 ) -> tuple[list[list[float]], float]:
-    """Aproxima o maior contorno com 10–30 vértices (fallback quando vazio)."""
+    """Aproxima o maior contorno com 12–28 vértices (fallback quando vazio)."""
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return fallback, 0.0
@@ -1087,25 +1220,31 @@ def _auto_polygon_from_mask(
 
     best: np.ndarray | None = None
     best_distance = 10**9
-    for step in range(1, 81):
-        epsilon = perimeter * (0.001 + step * 0.0012)
+    for step in range(1, 91):
+        epsilon = perimeter * (0.0008 + step * 0.0011)
         approx = cv2.approxPolyDP(contour, epsilon, True)
         count = len(approx)
-        if 10 <= count <= 30:
+        if 12 <= count <= 28:
             best = approx
             break
-        distance = min(abs(count - 10), abs(count - 30))
+        distance = min(abs(count - 12), abs(count - 28))
         if distance < best_distance:
             best_distance = distance
             best = approx
 
     if best is None or len(best) < 3:
         return fallback, 0.0
+    if len(best) < 12 or len(best) > 28:
+        best = _auto_resample_polygon(
+            best.reshape(-1, 2), 12 if len(best) < 12 else 28
+        ).reshape(-1, 1, 2)
     points = [
         [float(round(point[0][0], 2)), float(round(point[0][1], 2))]
         for point in best
     ]
-    return points, float(abs(cv2.contourArea(best)))
+    return points, float(
+        abs(cv2.contourArea(np.asarray(best, dtype=np.float32)))
+    )
 
 
 def auto_segment_polygon(
@@ -1115,13 +1254,19 @@ def auto_segment_polygon(
     sensitivity: float = 0.5,
     mode: str = "auto",
 ) -> dict[str, object]:
-    """Segmenta a região-alvo com estatísticas CIELAB da pele + GrabCut.
+    """Segmenta a região-alvo por contraste local CIELAB (anti-colapso).
 
-    A caixa ``[x, y, w, h]`` define a área de busca. A pele saudável é
-    amostrada no anel externo da caixa (com a moldura da imagem como
-    reserva) e cada pixel recebe uma afinidade colorimétrica normalizada pelo
-    desvio-padrão sadio. ``seed_polygon`` restringe os candidatos a um
-    corredor dilatado — útil para acompanhar a mesma lesão em T1..Tn.
+    Em vez de um limiar global de ``L*``, cada perfil compara o pixel com a
+    pele imediatamente ao redor (fundo gaussiano local):
+
+    * ``alba``: clareamento local + queda de croma + textura Top/Black-Hat;
+    * ``rubra``: excesso local de ``a*`` + dominância local de ``R - G``;
+    * ``auto``: fusão dos dois perfis + ΔE00 local.
+
+    A máscara é aberta (remove poros), fechada com kernel alongado na
+    orientação da caixa (conecta a estria) e fragmentos pequenos são
+    descartados. O GrabCut é usado de forma conservadora e nunca substitui
+    um resultado local por um ponto isolado.
 
     Returns:
         ``{"polygon": [[x, y], ...], "area_px": float, "confidence": float}``.
@@ -1136,24 +1281,30 @@ def auto_segment_polygon(
     x, y, w, h = _auto_clamp_box(box, width, height)
     lab = bgr_to_cielab_float(image)
 
-    ring = _auto_skin_ring((height, width), (x, y, w, h))
-    ring_pixels = lab[ring > 0]
-    if ring_pixels.size == 0:
-        raise ValueError("Não foi possível amostrar pele sadia ao redor da caixa")
-    healthy_mean = ring_pixels.mean(axis=0)
-    healthy_std = ring_pixels.std(axis=0)
-
-    score = _auto_color_score(lab, healthy_mean, healthy_std, mode)
-    # Sensibilidade alta admite desvios menores em relação à pele sadia.
-    threshold = 0.9 + (0.5 - float(sensitivity)) * 1.6
-
     box_mask = np.zeros((height, width), dtype=np.uint8)
     cv2.rectangle(box_mask, (x, y), (x + w - 1, y + h - 1), 255, -1)
 
-    candidates = np.where(score > threshold, 255, 0).astype(np.uint8)
+    background_kernel = 31 if max(w, h) < 420 else 41
+    texture_kernel = _auto_odd(max(7, min(21, 0.06 * max(w, h))))
+    structure_kernel = _auto_odd(max(15, min(151, 0.7 * min(w, h))))
+    alba_map, rubra_map, delta_e_map = _auto_profile_maps(
+        image, lab, box_mask, background_kernel, texture_kernel, structure_kernel
+    )
+
+    if mode == "alba":
+        score = alba_map
+    elif mode == "rubra":
+        score = rubra_map
+    else:
+        score = 0.45 * alba_map + 0.45 * rubra_map + 0.10 * delta_e_map
+
+    # Sensibilidade modula o limiar do mapa normalizado (0..1).
+    threshold = 0.58 - 0.38 * float(sensitivity)
+    candidates = np.where(score >= threshold, 255, 0).astype(np.uint8)
     candidates = cv2.bitwise_and(candidates, box_mask)
 
     corridor: np.ndarray | None = None
+    seed_points: np.ndarray | None = None
     if seed_polygon is not None:
         seed_points = np.asarray(list(seed_polygon), dtype=np.float64)
         if seed_points.ndim != 2 or seed_points.shape[1] != 2 or len(seed_points) < 3:
@@ -1165,22 +1316,14 @@ def auto_segment_polygon(
             float(seed_points[:, 1].max() - seed_points[:, 1].min()),
         )
         radius = max(3, int(round(0.12 * span)))
-        kernel = cv2.getStructuringElement(
+        corridor_kernel = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1)
         )
-        corridor = cv2.dilate(seed_mask, kernel)
+        corridor = cv2.dilate(seed_mask, corridor_kernel)
         candidates = cv2.bitwise_and(candidates, corridor)
 
-    kernel_size = _auto_odd(0.02 * min(w, h))
-    kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
-    )
-    candidates = cv2.morphologyEx(candidates, cv2.MORPH_OPEN, kernel)
-    candidates = cv2.morphologyEx(candidates, cv2.MORPH_CLOSE, kernel)
-    candidates = _auto_largest_component(candidates)
-
     # Fallback limpo: contorno de T0 (se houver) ou a própria caixa.
-    if seed_polygon is not None:
+    if seed_points is not None:
         fallback = [
             [float(round(point[0], 2)), float(round(point[1], 2))]
             for point in seed_points
@@ -1193,60 +1336,100 @@ def auto_segment_polygon(
             [float(x), float(y + h)],
         ]
 
-    if cv2.countNonZero(candidates) == 0:
+    # Abertura leve remove poros/pontos de brilho isolados.
+    open_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (3, 3)
+    )
+    candidates = cv2.morphologyEx(candidates, cv2.MORPH_OPEN, open_kernel)
+
+    # Fechamento alongado na orientação da caixa conecta a estria inteira.
+    long_axis = max(w, h)
+    close_kernel = _auto_orientation_kernel(
+        w,
+        h,
+        length=int(round(0.22 * long_axis)),
+        thickness=int(round(0.045 * long_axis)),
+    )
+    candidates = cv2.morphologyEx(candidates, cv2.MORPH_CLOSE, close_kernel)
+
+    # Anti-colapso: ignora fragmentos menores que 2% da área da caixa.
+    min_area = max(12.0, 0.02 * w * h)
+    candidates, components = _auto_keep_components(candidates, min_area)
+    if components == 0:
         return {
             "polygon": fallback,
             "area_px": 0.0,
             "confidence": 0.05,
         }
 
-    # GrabCut refina a máscara em um recorte com folga ao redor da caixa.
-    pad = max(8, int(round(0.2 * max(w, h))))
+    # Vários fragmentos alinhados da mesma estria: envoltório morfológico.
+    if components > 1:
+        bridge_kernel = _auto_orientation_kernel(
+            w,
+            h,
+            length=int(round(0.35 * long_axis)),
+            thickness=int(round(0.08 * long_axis)),
+        )
+        bridged = cv2.morphologyEx(candidates, cv2.MORPH_CLOSE, bridge_kernel)
+        bridged = _auto_largest_component(bridged)
+        bridged, bridged_components = _auto_keep_components(bridged, min_area)
+        if bridged_components > 0:
+            candidates = bridged
+
+    if corridor is not None:
+        candidates = cv2.bitwise_and(candidates, corridor)
+
+    # GrabCut conservador: só aceita refinamento que preserva massa suficiente.
+    refined = candidates
+    candidate_area = float(cv2.countNonZero(candidates))
+    pad = max(8, int(round(0.2 * long_axis)))
     cx0, cy0 = max(0, x - pad), max(0, y - pad)
     cx1, cy1 = min(width, x + w + pad), min(height, y + h + pad)
     crop = image[cy0:cy1, cx0:cx1]
     local_box = box_mask[cy0:cy1, cx0:cx1]
     local_candidates = candidates[cy0:cy1, cx0:cx1]
-
-    gc_mask = np.full(crop.shape[:2], cv2.GC_BGD, dtype=np.uint8)
-    inside_box = local_box > 0
-    gc_mask[inside_box] = cv2.GC_PR_BGD
-    gc_mask[local_candidates > 0] = cv2.GC_PR_FGD
-    refined = candidates
-    if cv2.countNonZero(gc_mask == cv2.GC_PR_FGD) >= 8:
-        background = np.zeros((1, 65), dtype=np.float64)
-        foreground = np.zeros((1, 65), dtype=np.float64)
-        try:
-            cv2.grabCut(
-                crop,
-                gc_mask,
-                None,
-                background,
-                foreground,
-                3,
-                cv2.GC_INIT_WITH_MASK,
-            )
-            grabcut = np.where(
-                (gc_mask == cv2.GC_FGD) | (gc_mask == cv2.GC_PR_FGD), 255, 0
-            ).astype(np.uint8)
-            grabcut = cv2.bitwise_and(grabcut, local_box)
-            if cv2.countNonZero(grabcut) >= 8:
-                refined = np.zeros((height, width), dtype=np.uint8)
-                refined[cy0:cy1, cx0:cx1] = grabcut
-        except cv2.error:
-            refined = candidates
+    if mode != "alba" and candidate_area >= 0.003 * w * h:
+        gc_mask = np.full(crop.shape[:2], cv2.GC_BGD, dtype=np.uint8)
+        gc_mask[local_box > 0] = cv2.GC_PR_BGD
+        gc_mask[local_candidates > 0] = cv2.GC_PR_FGD
+        if cv2.countNonZero(gc_mask == cv2.GC_PR_FGD) >= 8:
+            background = np.zeros((1, 65), dtype=np.float64)
+            foreground = np.zeros((1, 65), dtype=np.float64)
+            try:
+                cv2.grabCut(
+                    crop,
+                    gc_mask,
+                    None,
+                    background,
+                    foreground,
+                    2,
+                    cv2.GC_INIT_WITH_MASK,
+                )
+                grabcut = np.where(
+                    (gc_mask == cv2.GC_FGD) | (gc_mask == cv2.GC_PR_FGD), 255, 0
+                ).astype(np.uint8)
+                grabcut = cv2.bitwise_and(grabcut, local_box)
+                grabcut_mask = np.zeros((height, width), dtype=np.uint8)
+                grabcut_mask[cy0:cy1, cx0:cx1] = grabcut
+                grabcut_area = float(cv2.countNonZero(grabcut_mask))
+                if 0.4 * candidate_area <= grabcut_area <= 2.5 * candidate_area:
+                    refined = grabcut_mask
+            except cv2.error:
+                refined = candidates
 
     refined = cv2.bitwise_and(refined, box_mask)
     if corridor is not None:
         refined = cv2.bitwise_and(refined, corridor)
-    refined = cv2.morphologyEx(refined, cv2.MORPH_CLOSE, kernel)
+    open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    refined = cv2.morphologyEx(refined, cv2.MORPH_CLOSE, open_kernel)
     refined = _auto_largest_component(refined)
     if cv2.countNonZero(refined) == 0:
         refined = candidates
 
     polygon, area_px = _auto_polygon_from_mask(refined, fallback)
     inside = score[refined > 0]
-    contrast = float(np.tanh(float(inside.mean()) / 3.0)) if inside.size else 0.0
+    mean_inside = float(inside.mean()) if inside.size else 0.0
+    contrast = float(np.clip(mean_inside / max(threshold, 0.2), 0.0, 1.0))
     perimeter = cv2.arcLength(
         np.asarray(polygon, dtype=np.float32).reshape(-1, 1, 2), True
     )
@@ -1254,7 +1437,7 @@ def auto_segment_polygon(
     if perimeter > 0:
         compactness = float(min(1.0, 4.0 * np.pi * area_px / (perimeter**2)))
     confidence = float(
-        np.clip(0.35 + 0.45 * contrast + 0.2 * compactness, 0.05, 0.98)
+        np.clip(0.30 + 0.45 * contrast + 0.20 * compactness, 0.05, 0.98)
     )
 
     return {

@@ -552,6 +552,7 @@ def test_auto_segment_controls_and_api_calls():
     assert "function scheduleAutoSegment" in js
     assert "window.clearTimeout(autoSegmentTimer)" in js
     assert "state.polygon = response.polygon" in call
+    assert "state.polygonAuto = true" in call
 
 
 def test_auto_segment_ghost_overlay_and_t0_validation():
@@ -563,6 +564,11 @@ def test_auto_segment_ghost_overlay_and_t0_validation():
     # Caixa de busca desenhada por arraste.
     assert "type: \"autobox\"" in js
     assert "function drawAutoBox" in js
+    # Após a auto-detecção não sobra linha-guia solta; vértices já editáveis.
+    assert "!state.polygonAuto" in js
+    assert "function insertVertexOnEdge" in js
+    assert "function nearestPointOnSegment" in js
+    assert "type: \"vertex\"" in js
     # Validação visual antes de salvar desvios relevantes.
     assert "function t0DeviationWarnings" in js
     assert "> 10" in js

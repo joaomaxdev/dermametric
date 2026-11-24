@@ -99,6 +99,7 @@ const state = {
   files: {},
   polygon: [],
   polygonActive: false,
+  polygonAuto: false,
   stria: "L1",
   autoBox: null,
   autoDrawing: false,
@@ -2690,6 +2691,15 @@ function screenOfLandmark(point) {
   return toScreen([point.x, point.y]);
 }
 
+function nearestPointOnSegment(point, start, end) {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lengthSq = dx * dx + dy * dy;
+  if (lengthSq <= 1e-9) return { x: start.x, y: start.y };
+  const t = Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSq));
+  return { x: start.x + t * dx, y: start.y + t * dy };
+}
+
 function hitTest(screenPoint) {
   const near = (target) => Math.hypot(screenPoint.x - target.x, screenPoint.y - target.y) <= HIT_RADIUS;
 
@@ -2697,6 +2707,21 @@ function hitTest(screenPoint) {
     for (let index = state.polygon.length - 1; index >= 0; index -= 1) {
       if (near(toScreen(state.polygon[index]))) {
         return { type: "vertex", index, label: `vértice ${index + 1}` };
+      }
+    }
+    if (state.polygonActive && state.polygon.length >= 3) {
+      for (let index = 0; index < state.polygon.length; index += 1) {
+        const start = toScreen(state.polygon[index]);
+        const end = toScreen(state.polygon[(index + 1) % state.polygon.length]);
+        const nearest = nearestPointOnSegment(screenPoint, start, end);
+        if (Math.hypot(screenPoint.x - nearest.x, screenPoint.y - nearest.y) <= HIT_RADIUS) {
+          return {
+            type: "edge",
+            index,
+            point: toImage(nearest.x, nearest.y),
+            label: "aresta do polígono",
+          };
+        }
       }
     }
   }
@@ -2716,6 +2741,19 @@ function hitTest(screenPoint) {
     }
   }
   return null;
+}
+
+function insertVertexOnEdge(hit) {
+  if (!hit || !Array.isArray(hit.point)) return;
+  const index = Number(hit.index);
+  if (!Number.isInteger(index) || index < 0 || index >= state.polygon.length) return;
+  state.polygon.splice(index + 1, 0, [Number(hit.point[0]), Number(hit.point[1])]);
+  state.polygonActive = true;
+  state.hover = null;
+  state.hoverHit = null;
+  updatePolygonStatus();
+  scheduleRedraw();
+  toast("Vértice inserido na aresta do polígono.", "info", 2200);
 }
 
 function removePoint(hit) {
@@ -2883,7 +2921,7 @@ function drawOverlays(ctx) {
     const meta = lesionMeta(state.stria);
     if (state.polygon.length) {
       drawPolygon(ctx, state.polygon, meta.stroke, meta.soft, meta.short, true);
-      if (state.polygonActive && state.hover && pointInImage(state.hover)) {
+      if (state.polygonActive && !state.polygonAuto && state.hover && pointInImage(state.hover)) {
         const last = toScreen(state.polygon[state.polygon.length - 1]);
         const p = toScreen(state.hover);
         ctx.save();
@@ -3280,6 +3318,17 @@ function onPointerDown(event) {
     return;
   }
 
+  if (event.button === 0 && state.step === 4 && !state.autoDrawing && state.polygonActive) {
+    const hit = hitTest(toScreen(pt.x, pt.y));
+    if (hit && hit.type === "vertex") {
+      event.preventDefault();
+      press = { x: pt.x, y: pt.y, moved: false, button: 0 };
+      drag = { type: "vertex", index: hit.index };
+      canvas.setPointerCapture?.(event.pointerId);
+      return;
+    }
+  }
+
   if (event.button === 0 && state.step === 4 && state.autoDrawing) {
     event.preventDefault();
     const imagePoint = toImage(pt.x, pt.y);
@@ -3359,6 +3408,11 @@ function onPointerMove(event) {
     const h = Math.abs(imagePoint[1] - start[1]);
     drag.roi = [x, y, w, h];
     scheduleRedraw();
+  } else if (drag && drag.type === "vertex") {
+    if (state.polygon[drag.index]) {
+      state.polygon[drag.index] = [imagePoint[0], imagePoint[1]];
+    }
+    scheduleRedraw();
   } else if (drag && drag.type === "autobox") {
     const start = drag.start;
     const x = Math.min(start[0], imagePoint[0]);
@@ -3409,6 +3463,21 @@ function onPointerUp(event) {
     drag = null;
     wrap.classList.remove("is-panning");
     canvas.releasePointerCapture?.(event.pointerId);
+    press = null;
+    return;
+  }
+
+  if (drag && drag.type === "vertex") {
+    const index = drag.index;
+    const moved = Boolean(press && press.moved);
+    drag = null;
+    canvas.releasePointerCapture?.(event.pointerId);
+    if (!moved) {
+      removePoint({ type: "vertex", index, label: `vértice ${index + 1}` });
+    } else {
+      updatePolygonStatus();
+      scheduleRedraw();
+    }
     press = null;
     return;
   }
@@ -3500,6 +3569,10 @@ function handleCanvasClick(point) {
 
   const hit = hitTest(toScreen(point));
   if (hit) {
+    if (hit.type === "edge") {
+      insertVertexOnEdge(hit);
+      return;
+    }
     removePoint(hit);
     return;
   }
@@ -3598,6 +3671,7 @@ function onKeyDown(event) {
   if (event.key === "Escape") {
     state.polygon = [];
     state.polygonActive = false;
+    state.polygonAuto = false;
     state.autoDrawing = false;
     lastPolygonClick = null;
     updatePolygonStatus();
@@ -3699,6 +3773,7 @@ function syncToolsFromSession() {
   state.roi = Array.isArray(session.healthy_skin_roi) ? [...session.healthy_skin_roi] : null;
   state.polygon = [];
   state.polygonActive = false;
+  state.polygonAuto = false;
   state.autoBox = null;
   state.autoDrawing = false;
   state.autoBusy = false;
@@ -4413,7 +4488,7 @@ function step4HTML(session) {
           Importar ROIs do T0
         </button>` : ""}
     </div>
-    <p class="form-hint">${ready ? "Clique nos vértices acompanhando o contorno · clique num vértice para removê-lo · duplo clique fecha e mede." : "O polígono usa a imagem alinhada do passo 3."}</p>
+    <p class="form-hint">${ready ? "Arraste vértices para ajustar · clique numa aresta para inserir · clique num vértice para remover · duplo clique fecha e mede." : "O polígono usa a imagem alinhada do passo 3."}</p>
 
     ${ready ? `
       <div class="auto-segment">
@@ -4599,6 +4674,7 @@ async function runAutoSegment(options = {}) {
     }
     state.polygon = response.polygon.map((point) => [Number(point[0]), Number(point[1])]);
     state.polygonActive = true;
+    state.polygonAuto = true;
     state.hover = null;
     state.hoverHit = null;
     lastPolygonClick = null;
@@ -4643,6 +4719,7 @@ function pinT0Mask() {
   }
   state.polygon = reference.points.map((point) => [Number(point[0]), Number(point[1])]);
   state.polygonActive = true;
+  state.polygonAuto = true;
   state.autoDrawing = false;
   state.hover = null;
   state.hoverHit = null;
@@ -4688,6 +4765,7 @@ async function measureStria() {
     });
     state.polygon = [];
     state.polygonActive = false;
+    state.polygonAuto = false;
     lastPolygonClick = null;
     state.hover = null;
     state.hoverHit = null;
@@ -4945,6 +5023,7 @@ function handleAction(action, target) {
       // Deep copy: a edição local não altera os polígonos de T0.
       state.polygon = roi.points.map((point) => [Number(point[0]), Number(point[1])]);
       state.polygonActive = true;
+      state.polygonAuto = true;
       state.hover = null;
       state.hoverHit = null;
       lastPolygonClick = null;
@@ -4958,6 +5037,7 @@ function handleAction(action, target) {
     case "clear-polygon":
       state.polygon = [];
       state.polygonActive = false;
+      state.polygonAuto = false;
       lastPolygonClick = null;
       updatePolygonStatus();
       scheduleRedraw();
@@ -5021,6 +5101,7 @@ function onDocumentClick(event) {
     state.stria = lesionCode(striaTarget.dataset.stria);
     state.polygon = [];
     state.polygonActive = false;
+    state.polygonAuto = false;
     state.autoBox = null;
     state.autoDrawing = false;
     lastPolygonClick = null;

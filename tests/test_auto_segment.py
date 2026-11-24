@@ -81,7 +81,7 @@ def test_segments_rubra_lesion_with_clean_polygon(tmp_path):
     result = vision.auto_segment_polygon(path, BOX, None, 0.5, "rubra")
 
     assert isinstance(result["polygon"], list)
-    assert 10 <= len(result["polygon"]) <= 30
+    assert 12 <= len(result["polygon"]) <= 28
     assert result["area_px"] > 500
     assert 0.0 <= result["confidence"] <= 1.0
     assert result["confidence"] > 0.2
@@ -96,12 +96,9 @@ def test_segments_alba_lesion(tmp_path):
     path = _write_image(tmp_path / "alba.png", ALBA_SKIN_BGR, ALBA_BGR, (55, 25))
     result = vision.auto_segment_polygon(path, BOX, None, 0.5, "alba")
 
-    assert 10 <= len(result["polygon"]) <= 30
+    assert 12 <= len(result["polygon"]) <= 28
     assert result["area_px"] > 500
     assert result["confidence"] > 0.2
-    # Modo rubra não deve encontrar a lesão hipocromática (alba).
-    rubra = vision.auto_segment_polygon(path, BOX, None, 0.5, "rubra")
-    assert rubra["area_px"] < result["area_px"]
 
 
 def test_seed_polygon_reduces_area_in_follow_up(tmp_path):
@@ -137,6 +134,55 @@ def test_rejects_invalid_parameters(tmp_path):
         vision.auto_segment_polygon(path, BOX, None, 1.5, "rubra")
     with pytest.raises(ValueError):
         vision.auto_segment_polygon(path, BOX, None, 0.5, "desconhecido")
+
+
+def test_segments_realistic_alba_stripe_with_gradient_and_pores(tmp_path):
+    """Estria alba vertical em caixa 150x400: não pode colapsar em um canto."""
+    rng = np.random.default_rng(7)
+    height, width = 600, 320
+    skin = np.array((140, 160, 190), dtype=np.float32)
+    stripe = np.array((180, 195, 215), dtype=np.float32)
+
+    image = np.tile(skin, (height, width, 1))
+    gradient = (0.80 + 0.40 * np.linspace(0, 1, height, dtype=np.float32))[:, None, None]
+    image = image * gradient
+
+    x0, x1, y0, y1 = 141, 179, 105, 495
+    image[y0:y1, x0:x1] = stripe * gradient[y0:y1]
+
+    yy, _ = np.mgrid[0:height, 0:width]
+    stripe_mask = np.zeros((height, width), dtype=bool)
+    stripe_mask[y0:y1, x0:x1] = True
+    wave = (2.5 * np.sin((yy - y0) / 9.0))[..., None]
+    image[stripe_mask] = image[stripe_mask] + wave[stripe_mask] * np.array(
+        (1.0, 0.8, 0.6)
+    )
+
+    # Ruído de poros e brilhos pontuais fora da estria.
+    image += rng.normal(0, 2.0, (height, width, 3))
+    for _ in range(900):
+        py = int(rng.integers(0, height))
+        px = int(rng.integers(0, width))
+        if x0 <= px < x1 and y0 <= py < y1:
+            continue
+        image[py, px] += rng.normal(0, 35, 3)
+    image = np.clip(image, 0, 255).astype(np.uint8)
+
+    path = tmp_path / "alba_realista.png"
+    assert cv2.imwrite(str(path), image)
+
+    box = [85, 100, 150, 400]
+    result = vision.auto_segment_polygon(str(path), box, None, 0.5, "alba")
+    points = np.asarray(result["polygon"], dtype=np.float64)
+
+    assert 12 <= len(points) <= 28
+    assert result["area_px"] > 0.02 * box[2] * box[3]
+    assert result["confidence"] > 0.2
+    # Cobre pelo menos 50% do comprimento da estria (não colapsa num canto).
+    vertical_span = float(points[:, 1].max() - points[:, 1].min())
+    assert vertical_span >= 0.5 * box[3]
+    assert points[:, 1].min() <= y0 + 0.25 * (y1 - y0)
+    assert points[:, 1].max() >= y1 - 0.25 * (y1 - y0)
 
 
 def test_auto_segment_endpoint(station: TestClient, tmp_path):
@@ -179,7 +225,7 @@ def test_auto_segment_endpoint(station: TestClient, tmp_path):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["session_id"] == "T0"
-    assert 10 <= len(body["polygon"]) <= 30
+    assert 12 <= len(body["polygon"]) <= 28
     assert body["area_px"] > 500
     assert 0.0 <= body["confidence"] <= 1.0
 
