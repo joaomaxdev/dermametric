@@ -1068,20 +1068,82 @@ def _auto_texture_map(lightness: np.ndarray, kernel_size: int) -> np.ndarray:
     return cv2.GaussianBlur(texture, (5, 5), 0)
 
 
+def _auto_axis_sigmas(w: int, h: int) -> tuple[float, float]:
+    """Sigmas anisotrópicos ``(sigmaX, sigmaY)`` ao longo do eixo da caixa.
+
+    A maior dimensão da caixa define o eixo da estria. A suavização é forte
+    nesse eixo (preserva a continuidade da faixa) e fraca no eixo
+    perpendicular (preserva a largura real da lesão).
+    """
+    long_axis = max(w, h)
+    along = float(np.clip(0.025 * long_axis, 2.0, 9.0))
+    across = float(np.clip(0.006 * long_axis, 0.7, 2.5))
+    if w >= h:
+        return along, across
+    return across, along
+
+
+def _auto_axis_smooth(channel: np.ndarray, w: int, h: int) -> np.ndarray:
+    """Filtro direcional (ridge/band) que realça faixas contínuas.
+
+    Poros e pelos são estruturas pontuais: ao suavizar ao longo do eixo maior
+    da caixa, eles praticamente desaparecem, enquanto a energia de uma estria
+    contínua se mantém.
+    """
+    sigma_x, sigma_y = _auto_axis_sigmas(w, h)
+    return cv2.GaussianBlur(
+        channel.astype(np.float32), (0, 0), sigmaX=sigma_x, sigmaY=sigma_y
+    )
+
+
+def _auto_centrality_profile(length: int, edge: float = 0.15) -> np.ndarray:
+    """Perfil gaussiano perpendicular, zerado nos ``edge`` externos."""
+    positions = (np.arange(length, dtype=np.float32) + 0.5) / float(length)
+    profile = np.exp(-0.5 * ((positions - 0.5) / 0.20) ** 2)
+    profile[(positions < edge) | (positions > 1.0 - edge)] = 0.0
+    return profile.astype(np.float32)
+
+
+def _auto_centrality_prior(
+    height: int,
+    width: int,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    edge: float = 0.15,
+) -> np.ndarray:
+    """Prior espacial: máximo no corredor central da caixa desenhada.
+
+    A borda lateral da caixa é tratada como referência de pele sadia, então
+    os ``edge`` mais externos de cada lado são suprimidos. O perfil é
+    perpendicular ao eixo maior da caixa.
+    """
+    prior = np.zeros((height, width), dtype=np.float32)
+    if w >= h:
+        # Eixo maior horizontal: o perfil é perpendicular (ao longo de Y).
+        prior[y : y + h, x : x + w] = _auto_centrality_profile(h, edge)[:, None]
+    else:
+        # Eixo maior vertical: o perfil é perpendicular (ao longo de X).
+        prior[y : y + h, x : x + w] = _auto_centrality_profile(w, edge)[None, :]
+    return prior
+
+
 def _auto_morph_background(
     channel: np.ndarray, kernel_size: int, *, bright: bool
 ) -> np.ndarray:
-    """Fundo de pele estimado por morfologia (remove a estria da amostra).
+    """Fundo de pele estimado por morfologia (remove a própria lesão).
 
-    ``bright=True`` usa fechamento para estimar o entorno escuro de uma
-    estrutura clara (alba/rubra em ``L*``/``a*``). ``bright=False`` usa
-    abertura para estimar o entorno claro de uma estrutura escura (croma e
-    ``R - G``).
+    ``bright=True`` estima a pele mais escura ao redor de uma estrutura mais
+    clara (alba em ``L*``, rubra em ``a*``), aplicando uma abertura que erode
+    a lesão. ``bright=False`` estima a pele mais clara ao redor de uma
+    estrutura mais escura (queda de croma, ``R - G``), aplicando um
+    fechamento.
     """
     kernel = cv2.getStructuringElement(
         cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
     )
-    operation = cv2.MORPH_CLOSE if bright else cv2.MORPH_OPEN
+    operation = cv2.MORPH_OPEN if bright else cv2.MORPH_CLOSE
     return cv2.morphologyEx(channel.astype(np.float32), operation, kernel)
 
 
@@ -1092,11 +1154,19 @@ def _auto_profile_maps(
     background_kernel: int,
     texture_kernel: int,
     structure_kernel: int,
+    w: int,
+    h: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Mapas normalizados de alba, rubra e ΔE00 local (contraste relativo)."""
-    lightness = lab[..., 0]
-    a_channel = lab[..., 1]
-    b_channel = lab[..., 2]
+    """Mapas normalizados de alba, rubra e ΔE00 local (contraste relativo).
+
+    Os canais usados no contraste local passam antes por um filtro direcional
+    ao longo do eixo maior da caixa: estrias/cicatrizes contínuas são
+    preservadas e poros/pelos isolados são atenuados.
+    """
+    raw_lightness = lab[..., 0]
+    lightness = _auto_axis_smooth(raw_lightness, w, h)
+    a_channel = _auto_axis_smooth(lab[..., 1], w, h)
+    b_channel = _auto_axis_smooth(lab[..., 2], w, h)
     chroma = np.hypot(a_channel, b_channel)
 
     light_bg = _auto_background(lightness, background_kernel)
@@ -1114,7 +1184,7 @@ def _auto_profile_maps(
     # Alba: clareamento local + perda de saturação + microrrelevo atrófico.
     lightening = np.maximum(0.0, lightness - np.minimum(light_bg, light_skin))
     desaturation = np.maximum(0.0, np.maximum(chroma_bg, chroma_skin) - chroma)
-    texture = _auto_texture_map(lightness, texture_kernel)
+    texture = _auto_texture_map(raw_lightness, texture_kernel)
     alba = (
         0.50 * _auto_normalize(lightening, region)
         + 0.30 * _auto_normalize(desaturation, region)
@@ -1124,9 +1194,9 @@ def _auto_profile_maps(
     # Rubra: excesso local de a* + dominância local de vermelho (R - G).
     red = image[..., 2].astype(np.float32)
     green = image[..., 1].astype(np.float32)
-    red_excess = red - green
+    red_excess = _auto_axis_smooth(red - green, w, h)
     red_bg = _auto_background(red_excess, background_kernel)
-    red_skin = _auto_morph_background(red_excess, structure_kernel, bright=False)
+    red_skin = _auto_morph_background(red_excess, structure_kernel, bright=True)
     erythema = np.maximum(0.0, a_channel - np.minimum(a_bg, a_skin))
     local_red = np.maximum(0.0, red_excess - np.maximum(red_bg, red_skin))
     rubra = (
@@ -1206,7 +1276,11 @@ def _auto_resample_polygon(points: np.ndarray, target: int) -> np.ndarray:
 def _auto_polygon_from_mask(
     mask: np.ndarray, fallback: list[list[float]]
 ) -> tuple[list[list[float]], float]:
-    """Aproxima o maior contorno com 12–28 vértices (fallback quando vazio)."""
+    """Aproxima o maior contorno com 10–16 vértices (fallback quando vazio)."""
+    # Suavização geométrica: arredonda micro-reentrâncias e evita serrilhado.
+    smooth = cv2.GaussianBlur(mask.astype(np.float32), (5, 5), 0)
+    mask = np.where(smooth >= 127.0, 255, 0).astype(np.uint8)
+
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return fallback, 0.0
@@ -1224,19 +1298,19 @@ def _auto_polygon_from_mask(
         epsilon = perimeter * (0.0008 + step * 0.0011)
         approx = cv2.approxPolyDP(contour, epsilon, True)
         count = len(approx)
-        if 12 <= count <= 28:
+        if 10 <= count <= 16:
             best = approx
             break
-        distance = min(abs(count - 12), abs(count - 28))
+        distance = min(abs(count - 10), abs(count - 16))
         if distance < best_distance:
             best_distance = distance
             best = approx
 
     if best is None or len(best) < 3:
         return fallback, 0.0
-    if len(best) < 12 or len(best) > 28:
+    if len(best) < 10 or len(best) > 16:
         best = _auto_resample_polygon(
-            best.reshape(-1, 2), 12 if len(best) < 12 else 28
+            best.reshape(-1, 2), 10 if len(best) < 10 else 16
         ).reshape(-1, 1, 2)
     points = [
         [float(round(point[0][0], 2)), float(round(point[0][1], 2))]
@@ -1256,17 +1330,27 @@ def auto_segment_polygon(
 ) -> dict[str, object]:
     """Segmenta a região-alvo por contraste local CIELAB (anti-colapso).
 
+    Opera sempre sobre a imagem natural colorida alinhada ao T0 (BGR
+    original, sem equalizações destrutivas), recebida em
+    ``aligned_img_path``.
+
     Em vez de um limiar global de ``L*``, cada perfil compara o pixel com a
-    pele imediatamente ao redor (fundo gaussiano local):
+    pele imediatamente ao redor (fundo gaussiano local), após uma suavização
+    anisotrópica ao longo do eixo maior da caixa (ridge/band filter) que
+    realça faixas contínuas e atenua poros/pelos isolados:
 
     * ``alba``: clareamento local + queda de croma + textura Top/Black-Hat;
     * ``rubra``: excesso local de ``a*`` + dominância local de ``R - G``;
     * ``auto``: fusão dos dois perfis + ΔE00 local.
 
+    O mapa final é ponderado por um prior espacial gaussiano perpendicular
+    ao eixo maior da caixa (corredor central), com os 15% laterais mais
+    externos suprimidos (borda da caixa = pele sadia de referência).
+
     A máscara é aberta (remove poros), fechada com kernel alongado na
-    orientação da caixa (conecta a estria) e fragmentos pequenos são
-    descartados. O GrabCut é usado de forma conservadora e nunca substitui
-    um resultado local por um ponto isolado.
+    orientação da caixa (conecta a estria), suavizada geometricamente e
+    fragmentos pequenos são descartados. O GrabCut é usado de forma
+    conservadora e nunca substitui um resultado local por um ponto isolado.
 
     Returns:
         ``{"polygon": [[x, y], ...], "area_px": float, "confidence": float}``.
@@ -1288,7 +1372,14 @@ def auto_segment_polygon(
     texture_kernel = _auto_odd(max(7, min(21, 0.06 * max(w, h))))
     structure_kernel = _auto_odd(max(15, min(151, 0.7 * min(w, h))))
     alba_map, rubra_map, delta_e_map = _auto_profile_maps(
-        image, lab, box_mask, background_kernel, texture_kernel, structure_kernel
+        image,
+        lab,
+        box_mask,
+        background_kernel,
+        texture_kernel,
+        structure_kernel,
+        w,
+        h,
     )
 
     if mode == "alba":
@@ -1297,6 +1388,13 @@ def auto_segment_polygon(
         score = rubra_map
     else:
         score = 0.45 * alba_map + 0.45 * rubra_map + 0.10 * delta_e_map
+
+    # Prior de centralidade: a caixa deve envolver a lesão, então a
+    # probabilidade máxima fica no corredor central e as bordas laterais
+    # (pele sadia de referência) são suprimidas.
+    prior = _auto_centrality_prior(height, width, x, y, w, h)
+    prior_mask = np.where(prior > 0.0, 255, 0).astype(np.uint8)
+    score = (score * prior).astype(np.float32)
 
     # Sensibilidade modula o limiar do mapa normalizado (0..1).
     threshold = 0.58 - 0.38 * float(sensitivity)
@@ -1418,6 +1516,7 @@ def auto_segment_polygon(
                 refined = candidates
 
     refined = cv2.bitwise_and(refined, box_mask)
+    refined = cv2.bitwise_and(refined, prior_mask)
     if corridor is not None:
         refined = cv2.bitwise_and(refined, corridor)
     open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))

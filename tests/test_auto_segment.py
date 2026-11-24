@@ -81,7 +81,7 @@ def test_segments_rubra_lesion_with_clean_polygon(tmp_path):
     result = vision.auto_segment_polygon(path, BOX, None, 0.5, "rubra")
 
     assert isinstance(result["polygon"], list)
-    assert 12 <= len(result["polygon"]) <= 28
+    assert 10 <= len(result["polygon"]) <= 16
     assert result["area_px"] > 500
     assert 0.0 <= result["confidence"] <= 1.0
     assert result["confidence"] > 0.2
@@ -96,7 +96,7 @@ def test_segments_alba_lesion(tmp_path):
     path = _write_image(tmp_path / "alba.png", ALBA_SKIN_BGR, ALBA_BGR, (55, 25))
     result = vision.auto_segment_polygon(path, BOX, None, 0.5, "alba")
 
-    assert 12 <= len(result["polygon"]) <= 28
+    assert 10 <= len(result["polygon"]) <= 16
     assert result["area_px"] > 500
     assert result["confidence"] > 0.2
 
@@ -175,7 +175,7 @@ def test_segments_realistic_alba_stripe_with_gradient_and_pores(tmp_path):
     result = vision.auto_segment_polygon(str(path), box, None, 0.5, "alba")
     points = np.asarray(result["polygon"], dtype=np.float64)
 
-    assert 12 <= len(points) <= 28
+    assert 10 <= len(points) <= 16
     assert result["area_px"] > 0.02 * box[2] * box[3]
     assert result["confidence"] > 0.2
     # Cobre pelo menos 50% do comprimento da estria (não colapsa num canto).
@@ -183,6 +183,28 @@ def test_segments_realistic_alba_stripe_with_gradient_and_pores(tmp_path):
     assert vertical_span >= 0.5 * box[3]
     assert points[:, 1].min() <= y0 + 0.25 * (y1 - y0)
     assert points[:, 1].max() >= y1 - 0.25 * (y1 - y0)
+
+    # O contorno fica concentrado na faixa central, sem invadir as bordas
+    # laterais da caixa (que funcionam como referência de pele sadia).
+    left_limit = box[0] + 0.15 * box[2]
+    right_limit = box[0] + 0.85 * box[2]
+    assert points[:, 0].min() >= left_limit
+    assert points[:, 0].max() <= right_limit
+    max_width = float(points[:, 0].max() - points[:, 0].min())
+    assert max_width <= 0.45 * box[2]
+
+    # Compacidade: evita o contorno em zigue-zague (dentes laterais).
+    polygon_area = _polygon_area(result["polygon"])
+    perimeter = float(
+        np.sum(
+            np.hypot(
+                np.diff(np.append(points[:, 0], points[0, 0])),
+                np.diff(np.append(points[:, 1], points[0, 1])),
+            )
+        )
+    )
+    compactness = 4.0 * np.pi * polygon_area / (perimeter**2)
+    assert compactness >= 0.18
 
 
 def test_auto_segment_endpoint(station: TestClient, tmp_path):
@@ -225,7 +247,7 @@ def test_auto_segment_endpoint(station: TestClient, tmp_path):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["session_id"] == "T0"
-    assert 12 <= len(body["polygon"]) <= 28
+    assert 10 <= len(body["polygon"]) <= 16
     assert body["area_px"] > 500
     assert 0.0 <= body["confidence"] <= 1.0
 
