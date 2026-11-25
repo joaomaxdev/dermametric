@@ -914,6 +914,46 @@ def _mask_mean_lab(lab: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return pixels.mean(axis=0)
 
 
+def _mask_dimensions(mask: np.ndarray) -> dict[str, float]:
+    """Comprimento (PCA), largura média e máxima de uma máscara binária.
+
+    ``mean_width`` é definido como ``área / comprimento`` para garantir a
+    identidade dimensional ``área = comprimento × largura média``. A largura
+    máxima vem da transformada de distância (maior círculo inscrito).
+    """
+    pixel_count = int(cv2.countNonZero(mask))
+    if pixel_count == 0:
+        raise ValueError("Região vazia: não há pixels para medir")
+
+    ys, xs = np.nonzero(mask)
+    coords = np.column_stack((xs, ys)).astype(np.float64)
+    centered = coords - coords.mean(axis=0)
+    if pixel_count >= 2:
+        covariance = np.cov(centered, rowvar=False)
+        covariance = np.atleast_2d(covariance)
+        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+        major_axis = eigenvectors[:, int(np.argmax(eigenvalues))]
+        projection = centered @ major_axis
+        length_px = float(projection.max() - projection.min())
+    else:
+        length_px = 0.0
+    if length_px <= 0.0:
+        raise ValueError("Não foi possível medir o comprimento da região-alvo")
+
+    mean_width_px = float(pixel_count) / length_px
+    distance = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+    max_radius_px = float(distance.max())
+    # ``distanceTransform`` mede de centro a centro de pixel: corrige a
+    # quantização de meio pixel em cada lado (largura -= 1 px).
+    max_width_px = max(mean_width_px, max(0.0, 2.0 * max_radius_px - 1.0))
+    return {
+        "pixel_count": float(pixel_count),
+        "length_px": length_px,
+        "mean_width_px": mean_width_px,
+        "max_width_px": max_width_px,
+    }
+
+
 def measure_stria_polygon(
     aligned_img_path: str,
     polygon_pts: list[list[float]],
@@ -940,33 +980,10 @@ def measure_stria_polygon(
     pixel_count = int(cv2.countNonZero(mask))
     area_mm2 = pixel_count / (px_per_mm**2)
 
-    # Comprimento pelo eixo principal (PCA): projeção máxima da máscara na
-    # direção de maior variância. É robusto a ramificações do esqueleto e
-    # consistente com a escala px_per_mm da sessão.
-    ys, xs = np.nonzero(mask)
-    coords = np.column_stack((xs, ys)).astype(np.float64)
-    centered = coords - coords.mean(axis=0)
-    covariance = np.cov(centered, rowvar=False)
-    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
-    major_axis = eigenvectors[:, int(np.argmax(eigenvalues))]
-    projection = centered @ major_axis
-    length_px = float(projection.max() - projection.min())
-    if length_px <= 0.0:
-        raise ValueError("Não foi possível medir o comprimento da região-alvo")
-
-    # Largura média geométrica = área / comprimento. Por construção garante
-    # a consistência dimensional ``area_mm2 ≈ length_mm * mean_width_mm``.
-    mean_width_px = float(pixel_count) / length_px
-
-    # Largura máxima via transformada de distância (diâmetro do maior círculo
-    # inscrito). Corrigimos a quantização de meio pixel em cada lado.
-    distance = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
-    max_radius_px = float(distance.max())
-    width_quantization_px = 1.0
-    max_width_px = max(
-        mean_width_px,
-        max(0.0, 2.0 * max_radius_px - width_quantization_px),
-    )
+    dimensions = _mask_dimensions(mask)
+    length_px = dimensions["length_px"]
+    mean_width_px = dimensions["mean_width_px"]
+    max_width_px = dimensions["max_width_px"]
 
     lab = bgr_to_cielab_float(image)
     stria_lab = _mask_mean_lab(lab, mask)
@@ -980,6 +997,301 @@ def measure_stria_polygon(
         "max_width_mm": max_width_px / px_per_mm,
         "area_mm2": float(area_mm2),
         "delta_e_00": delta_e,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 4b. Mapeamento de campo (ROI) — detecção múltipla de estrias
+# ---------------------------------------------------------------------------
+FIELD_SCAN_MODES = ("auto", "rubra", "alba")
+
+
+def _field_normalize(values: np.ndarray, floor: float = 0.0) -> np.ndarray:
+    """Normaliza um mapa de contraste positivo com piso de ruído absoluto.
+
+    Diferente de ``_auto_normalize``, não amplifica ruído numérico quando o
+    mapa é praticamente constante (fundo de pele uniforme): valores abaixo de
+    ``floor`` são zerados e mapas sem sinal relevante viram zero.
+    """
+    values = np.asarray(values, dtype=np.float32)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return np.zeros_like(values, dtype=np.float32)
+    high = float(np.percentile(finite, 99))
+    if high <= max(floor * 2.0, 1e-3):
+        return np.zeros_like(values, dtype=np.float32)
+    cleaned = np.where(values >= floor, values, 0.0)
+    return np.clip(cleaned / high, 0.0, 1.0).astype(np.float32)
+
+
+def _field_ridge_response(
+    channel: np.ndarray, sigmas: tuple[float, ...] = (1.5, 3.0, 5.0, 8.0)
+) -> np.ndarray:
+    """Realce multi-escala de cristas via autovalores da Hessiana.
+
+    Estruturas lineares claras sobre fundo escuro têm o autovalor de maior
+    magnitude negativo. O máximo entre escalas normalizadas gera um mapa
+    ``0..1`` que privilegia faixas contínuas e atenua poros isolados.
+    """
+    values = channel.astype(np.float32)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return np.zeros_like(values)
+    low = float(np.percentile(finite, 2))
+    high = float(np.percentile(finite, 98))
+    span = max(high - low, 1e-6)
+    normalized = np.clip((values - low) / span, 0.0, 1.0)
+    best = np.zeros_like(normalized)
+    for sigma in sigmas:
+        blur = cv2.GaussianBlur(normalized, (0, 0), sigmaX=sigma, sigmaY=sigma)
+        dxx = cv2.Sobel(blur, cv2.CV_32F, 2, 0, ksize=3) * (sigma * sigma)
+        dyy = cv2.Sobel(blur, cv2.CV_32F, 0, 2, ksize=3) * (sigma * sigma)
+        dxy = cv2.Sobel(blur, cv2.CV_32F, 1, 1, ksize=3) * (sigma * sigma)
+        trace = dxx + dyy
+        diff = dxx - dyy
+        root = np.sqrt(np.maximum(diff * diff + 4.0 * dxy * dxy, 0.0))
+        eigen_a = 0.5 * (trace - root)
+        eigen_b = 0.5 * (trace + root)
+        major = np.where(
+            np.abs(eigen_a) >= np.abs(eigen_b), eigen_a, eigen_b
+        )
+        response = np.maximum(0.0, -major)
+        best = np.maximum(best, response)
+    return _field_normalize(best, floor=1e-3)
+
+
+def _field_median_background(
+    channel: np.ndarray, kernel_size: int
+) -> np.ndarray:
+    """Fundo de pele por mediana de grande escala, robusto à polaridade.
+
+    A mediana rejeita a estria (que ocupa menos da metade da janela),
+    independentemente de ela ser mais clara ou mais escura que a pele. Isso
+    evita o halo que uma média gaussiana cria ao redor de faixas longas.
+    """
+    values = np.asarray(channel, dtype=np.float32)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return values.copy()
+    low = float(np.percentile(finite, 0.5))
+    high = float(np.percentile(finite, 99.5))
+    span = high - low
+    if span <= 1e-6:
+        return np.full_like(values, low)
+    scaled = np.clip((values - low) / span * 255.0, 0.0, 255.0).astype(np.uint8)
+    ksize = int(kernel_size)
+    if ksize % 2 == 0:
+        ksize += 1
+    ksize = max(3, ksize)
+    blurred = cv2.medianBlur(scaled, ksize)
+    return blurred.astype(np.float32) / 255.0 * span + low
+
+
+def _field_profile_maps(
+    image: np.ndarray, lab: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Mapas de contraste local alba/rubra, sem suavização direcional.
+
+    O fundo de pele é estimado por mediana de grande escala, que remove a
+    própria estria da amostra. Assim o contraste é medido contra a pele ao
+    redor — independentemente da orientação e da polaridade da faixa na ROI.
+    """
+    lightness = lab[..., 0].astype(np.float32)
+    a_channel = lab[..., 1].astype(np.float32)
+    b_channel = lab[..., 2].astype(np.float32)
+    chroma = np.hypot(a_channel, b_channel)
+    kernel_size = max(31, int(round(0.4 * float(min(lightness.shape)))))
+
+    light_bg = _field_median_background(lightness, kernel_size)
+    lightening = np.maximum(0.0, lightness - light_bg)
+    chroma_bg = _field_median_background(chroma, kernel_size)
+    desaturation = np.maximum(0.0, chroma_bg - chroma)
+    alba = (
+        0.65 * _field_normalize(lightening, floor=1.0)
+        + 0.35 * _field_normalize(desaturation, floor=1.0)
+    )
+
+    a_bg = _field_median_background(a_channel, kernel_size)
+    erythema = np.maximum(0.0, a_channel - a_bg)
+    red_excess = image[..., 2].astype(np.float32) - image[..., 1].astype(np.float32)
+    red_bg = _field_median_background(red_excess, kernel_size)
+    local_red = np.maximum(0.0, red_excess - red_bg)
+    rubra = (
+        0.6 * _field_normalize(erythema, floor=1.0)
+        + 0.4 * _field_normalize(local_red, floor=2.5)
+    )
+    return (
+        np.clip(alba, 0.0, 1.0).astype(np.float32),
+        np.clip(rubra, 0.0, 1.0).astype(np.float32),
+    )
+
+
+def _field_polygon_from_component(component: np.ndarray) -> list[list[float]]:
+    """Contorno simplificado com 8 a 20 vértices para uma estria detectada."""
+    contours, _ = cv2.findContours(
+        component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    if not contours:
+        return []
+    contour = max(contours, key=cv2.contourArea)
+    perimeter = cv2.arcLength(contour, True)
+    if perimeter <= 0:
+        return []
+    best: np.ndarray | None = None
+    best_distance = 10**9
+    for step in range(1, 91):
+        epsilon = perimeter * (0.0008 + step * 0.0011)
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+        count = len(approx)
+        if 8 <= count <= 20:
+            best = approx
+            break
+        distance = min(abs(count - 8), abs(count - 20))
+        if distance < best_distance:
+            best_distance = distance
+            best = approx
+    if best is None or len(best) < 3:
+        return []
+    points = best.reshape(-1, 2).astype(np.float64)
+    if len(points) < 8:
+        points = _auto_resample_polygon(points, 8)
+    elif len(points) > 20:
+        points = _auto_resample_polygon(points, 20)
+    return [[float(round(point[0], 2)), float(round(point[1], 2))] for point in points]
+
+
+def scan_field_striae(
+    aligned_img_path: str,
+    roi_box: Iterable[float],
+    px_per_mm: float,
+    mode: str = "auto",
+    sensitivity: float = 0.5,
+    min_length_mm: float = 4.0,
+    max_length_mm: float = 120.0,
+    min_aspect_ratio: float = 2.5,
+) -> dict[str, object]:
+    """Detecta múltiplas estrias dentro de uma ROI ampla (mapeamento de campo).
+
+    Fluxo: contraste local CIELAB (``L*``/croma para alba, ``a*`` e
+    ``R - G`` para rubra, fusão em auto) + realce multi-escala de cristas
+    (Hessiana), binarização modulada por ``sensitivity``, limpeza morfológica
+    e componentes conexos individuais. Cada componente recebe métricas
+    geométricas consistentes (``area_mm2 ≈ length_mm × mean_width_mm``) e o
+    filtro global de comprimento/aspecto. Poros e ruídos circulares caem no
+    filtro de aspecto.
+
+    Returns:
+        ``{"objects": [...], "summary": {...}}`` com polígonos no referencial
+        alinhado da sessão.
+    """
+    if mode not in FIELD_SCAN_MODES:
+        raise ValueError(f"Modo de mapeamento inválido: {mode}")
+    sensitivity = float(sensitivity)
+    if not 0.1 <= sensitivity <= 1.0:
+        raise ValueError("sensitivity deve estar entre 0.1 e 1.0")
+    min_length_mm = float(min_length_mm)
+    max_length_mm = float(max_length_mm)
+    min_aspect_ratio = float(min_aspect_ratio)
+    if min_length_mm <= 0 or max_length_mm <= 0:
+        raise ValueError("Comprimentos mínimo e máximo devem ser positivos")
+    if min_length_mm >= max_length_mm:
+        raise ValueError("min_length_mm deve ser menor que max_length_mm")
+    if min_aspect_ratio <= 0:
+        raise ValueError("min_aspect_ratio deve ser positivo")
+
+    image = read_image_bgr(aligned_img_path)
+    height, width = image.shape[:2]
+    px_per_mm = float(px_per_mm)
+    if px_per_mm <= 0:
+        raise ValueError("px_per_mm deve ser maior que zero")
+    x, y, w, h = _auto_clamp_box(roi_box, width, height)
+    if w < 4 or h < 4:
+        raise ValueError("ROI pequena demais para o mapeamento de campo")
+
+    crop = image[y : y + h, x : x + w]
+    lab = bgr_to_cielab_float(crop)
+
+    alba_map, rubra_map = _field_profile_maps(crop, lab)
+    if mode == "alba":
+        profile = alba_map
+        ridge = _field_ridge_response(lab[..., 0])
+    elif mode == "rubra":
+        profile = rubra_map
+        red_excess = crop[..., 2].astype(np.float32) - crop[..., 1].astype(np.float32)
+        kernel_size = max(31, int(round(0.4 * float(min(w, h)))))
+        red_bg = _field_median_background(red_excess, kernel_size)
+        local_red = np.maximum(0.0, red_excess - red_bg)
+        ridge = _field_ridge_response(local_red)
+    else:
+        # Fusão ponderada evita que o halo de borda do perfil rubra infle a
+        # largura de estrias claras (alba).
+        profile = np.maximum(alba_map, 0.5 * rubra_map)
+        ridge = _field_ridge_response(lab[..., 0])
+
+    score = np.clip(0.62 * profile + 0.38 * ridge, 0.0, 1.0)
+    threshold = 0.50 - 0.30 * sensitivity
+    candidates = np.where(score >= threshold, 255, 0).astype(np.uint8)
+
+    open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    candidates = cv2.morphologyEx(candidates, cv2.MORPH_OPEN, open_kernel)
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    candidates = cv2.morphologyEx(candidates, cv2.MORPH_CLOSE, close_kernel)
+
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        candidates, connectivity=8
+    )
+    objects: list[dict[str, object]] = []
+    min_area_px = 6
+    for label in range(1, count):
+        if stats[label, cv2.CC_STAT_AREA] < min_area_px:
+            continue
+        component = np.where(labels == label, 255, 0).astype(np.uint8)
+        try:
+            dimensions = _mask_dimensions(component)
+        except ValueError:
+            continue
+        length_mm = dimensions["length_px"] / px_per_mm
+        mean_width_mm = dimensions["mean_width_px"] / px_per_mm
+        max_width_mm = dimensions["max_width_px"] / px_per_mm
+        area_mm2 = dimensions["pixel_count"] / (px_per_mm**2)
+        if length_mm < min_length_mm or length_mm > max_length_mm:
+            continue
+        aspect = length_mm / max(mean_width_mm, 0.1)
+        if aspect < min_aspect_ratio:
+            continue
+        polygon = _field_polygon_from_component(component)
+        if len(polygon) < 3:
+            continue
+        stria_lab = _mask_mean_lab(lab, component)
+        ring = _ring_mask(component, px_per_mm, ring_mm=3.0)
+        ring_lab = _mask_mean_lab(lab, ring)
+        delta_e = float(delta_e_ciede2000(stria_lab, ring_lab))
+        objects.append(
+            {
+                "polygon": [[px + x, py + y] for px, py in polygon],
+                "area_mm2": float(area_mm2),
+                "length_mm": float(length_mm),
+                "mean_width_mm": float(mean_width_mm),
+                "max_width_mm": float(max_width_mm),
+                "delta_e00": delta_e,
+            }
+        )
+
+    objects.sort(key=lambda item: float(item["area_mm2"]), reverse=True)
+    for index, item in enumerate(objects, start=1):
+        item["id"] = index
+
+    total_area = float(sum(float(item["area_mm2"]) for item in objects))
+    roi_area_mm2 = float(w * h) / (px_per_mm**2)
+    coverage = (total_area / roi_area_mm2 * 100.0) if roi_area_mm2 > 0 else 0.0
+    return {
+        "objects": objects,
+        "summary": {
+            "total_count": len(objects),
+            "total_area_mm2": total_area,
+            "roi_area_mm2": roi_area_mm2,
+            "coverage_pct": coverage,
+        },
     }
 
 

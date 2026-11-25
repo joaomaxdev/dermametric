@@ -594,3 +594,53 @@ def test_result_card_parses_brazilian_dates():
     assert 'return "Sem data"' in js
     # O card não deve delegar a data ao parser nativo (gera "Invalid Date").
     assert "new Date(current.created_at)" not in js
+
+
+# ---------------------------------------------------------------------------
+# Mapeamento de Campo (ROI) — modo complementar Quantirides
+# ---------------------------------------------------------------------------
+def test_field_scan_mode_controls_exist():
+    js = _js()
+    css = _css()
+    # Seletor de modo no topo do painel do passo 4.
+    assert "Mapeamento de Campo (ROI)" in js
+    assert 'data-action="morph-mode"' in js
+    assert 'data-mode="field"' in js
+    assert 'data-mode="lesions"' in js
+    # ROI ampla, botão de mapeamento e perfis colorimétricos.
+    assert 'data-action="field-draw-roi"' in js
+    assert 'data-action="field-scan"' in js
+    assert "Mapear estrias na ROI" in js
+    assert 'data-field-mode=' in js
+    assert '["auto", "Auto"]' in js
+    assert '["rubra", "Rubra"]' in js
+    assert '["alba", "Alba"]' in js
+    assert "function runFieldScan" in js
+    assert '"/field-scan"' in js
+    # Filtro global.
+    assert 'id="field-min-length"' in js
+    assert 'id="field-max-length"' in js
+    assert 'id="field-sensitivity"' in js
+    # Classificação em 3 faixas com cores Quantirides.
+    assert "FIELD_CATEGORIES" in js
+    assert "#06b6d4" in js
+    assert "#ec4899" in js
+    assert "#f59e0b" in js
+    assert 'id="field-criteria"' in js
+    assert "data-field-threshold" in js
+    assert "function fieldCategoryIndex" in js
+    assert "function fieldCategorySummary" in js
+    assert "function updateFieldClassificationUI" in js
+    # Renderização com transparência e envio opcional para L1–L4.
+    assert "function drawFieldScene" in js
+    assert "ctx.globalAlpha = 0.42" in js
+    assert "function updateFieldTooltip" in js
+    assert 'data-action="field-assign"' in js
+    assert "function assignFieldObject" in js
+    # Persistência no estado da sessão.
+    assert "state.fieldResults[session.id]" in js
+
+    assert ".morph-mode" in css
+    assert ".field-scan" in css
+    assert ".field-classification" in css
+    assert ".field-legend" in css

@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 # Códigos flexíveis: L1..L4 (novo padrão) e E1..E4 (legado).
 StriaCode = Annotated[
@@ -191,6 +191,57 @@ class AutoSegmentRequest(BaseModel):
         return points
 
 
+class FieldScanRequest(BaseModel):
+    """Mapeamento de campo: ROI ampla para detecção múltipla de estrias."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    roi_box: list[float] = Field(
+        min_length=4,
+        max_length=4,
+        description="[x, y, w, h] da ROI no referencial alinhado da sessão",
+    )
+    mode: Literal["auto", "rubra", "alba"] = Field(
+        default="auto",
+        description="Perfil colorimétrico: rubra (eritema), alba (hipocromia) ou auto",
+    )
+    sensitivity: float = Field(
+        default=0.5,
+        ge=0.1,
+        le=1.0,
+        description="Sensibilidade do mapeamento (0.1 conservadora, 1.0 permissiva)",
+    )
+    min_length_mm: float = Field(
+        default=4.0, gt=0, description="Comprimento mínimo aceito (mm)"
+    )
+    max_length_mm: float = Field(
+        default=120.0, gt=0, description="Comprimento máximo aceito (mm)"
+    )
+    min_aspect_ratio: float = Field(
+        default=2.5,
+        gt=0,
+        description="Razão comprimento/largura mínima (filtra poros circulares)",
+    )
+
+    @field_validator("roi_box")
+    @classmethod
+    def _check_roi_box(cls, value: list[float]) -> list[float]:
+        x, y, w, h = (float(item) for item in value)
+        if w <= 0 or h <= 0:
+            raise ValueError("roi_box deve ter largura e altura positivas")
+        if x < 0 or y < 0:
+            raise ValueError("roi_box não pode ter coordenadas negativas")
+        return [x, y, w, h]
+
+    @field_validator("max_length_mm")
+    @classmethod
+    def _check_lengths(cls, value: float, info: ValidationInfo) -> float:
+        minimum = info.data.get("min_length_mm")
+        if minimum is not None and value <= minimum:
+            raise ValueError("max_length_mm deve ser maior que min_length_mm")
+        return value
+
+
 class ClinicalScalesRequest(BaseModel):
     """Escalas clínicas subjetivas registradas na sessão."""
 
@@ -254,6 +305,7 @@ __all__ = [
     "AutoSegmentRequest",
     "CalibrationRequest",
     "ClinicalScalesRequest",
+    "FieldScanRequest",
     "LandmarkPoint",
     "LesionLabelsRequest",
     "MeasureRequest",

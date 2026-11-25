@@ -38,6 +38,7 @@ try:  # importação como pacote (uvicorn backend.main:app / pytest)
         AutoSegmentRequest,
         CalibrationRequest,
         ClinicalScalesRequest,
+        FieldScanRequest,
         LesionLabelsRequest,
         MeasureRequest,
         RegisterRequest,
@@ -58,6 +59,7 @@ except ImportError:  # pragma: no cover - execução direta de dentro de backend
         AutoSegmentRequest,
         CalibrationRequest,
         ClinicalScalesRequest,
+        FieldScanRequest,
         LesionLabelsRequest,
         MeasureRequest,
         RegisterRequest,
@@ -909,6 +911,37 @@ def auto_segment(
             payload.seed_polygon,
             payload.sensitivity,
             payload.mode,
+        )
+    return {"session_id": session_id, **result}
+
+
+@app.post("/api/sessions/{session_id}/field-scan")
+def field_scan(
+    session_id: str, payload: FieldScanRequest
+) -> dict[str, Any]:
+    """Mapeia múltiplas estrias dentro de uma ROI ampla da imagem alinhada."""
+    row = _require_session(session_id)
+    if not row["aligned_image_path"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Conclua o alinhamento da sessão antes do mapeamento de campo",
+        )
+    if not row["px_per_mm"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Calibre a régua (px_per_mm) antes do mapeamento de campo",
+        )
+    with _materialized(row["aligned_image_path"]) as aligned_path:
+        result = _vision_call(
+            vision.scan_field_striae,
+            str(aligned_path),
+            payload.roi_box,
+            float(row["px_per_mm"]),
+            payload.mode,
+            payload.sensitivity,
+            payload.min_length_mm,
+            payload.max_length_mm,
+            payload.min_aspect_ratio,
         )
     return {"session_id": session_id, **result}
 

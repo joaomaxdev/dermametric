@@ -25,8 +25,20 @@ const LEGACY_CODES = {
   E1: "L1", E2: "L2", E3: "L3", E4: "L4",
 };
 
-const LANDMARK_SUGGESTIONS = [
-  "Umbigo", "Nevo lateral D", "Nevo lateral E", "Cicatriz",
+// Classificação Quantirides: 3 faixas por cor sobre o mapeamento de campo.
+const FIELD_CATEGORIES = [
+  { key: "cyan", color: "#06b6d4", label: "Ciano · finas/leves" },
+  { key: "magenta", color: "#ec4899", label: "Magenta · moderadas" },
+  { key: "amber", color: "#f59e0b", label: "Âmbar · largas/intensas" },
+];
+
+const FIELD_CRITERIA = {
+  width: { label: "Largura média (mm)", min: 0.1, max: 10, step: 0.1, unit: "mm" },
+  length: { label: "Comprimento (mm)", min: 1, max: 120, step: 1, unit: "mm" },
+  delta: { label: "Contraste ΔE00", min: 0, max: 20, step: 0.1, unit: "" },
+};
+
+const LANDMARK_SUGGESTIONS = [  "Umbigo", "Nevo lateral D", "Nevo lateral E", "Cicatriz",
   "Borda costal", "Crista ilíaca", "Linha média", "Referência lateral",
 ];
 
@@ -106,6 +118,23 @@ const state = {
   autoMode: "auto",
   autoSensitivity: 0.5,
   autoBusy: false,
+  morphMode: "lesions",
+  fieldRoiDrawing: false,
+  fieldMode: "auto",
+  fieldSensitivity: 0.5,
+  fieldMinLength: 4,
+  fieldMaxLength: 120,
+  fieldMinAspect: 2.5,
+  fieldBusy: false,
+  fieldCriteria: "width",
+  fieldThresholds: {
+    width: [1.0, 2.5],
+    length: [10, 30],
+    delta: [3.0, 6.0],
+  },
+  fieldRois: {},
+  fieldResults: {},
+  fieldSelected: null,
   importedRois: null,
   loupe: true,
   spaceDown: false,
@@ -2941,6 +2970,9 @@ function drawOverlays(ctx) {
   }
 
   if (state.step === 4) {
+    if (state.morphMode === "field") {
+      drawFieldScene(ctx, session);
+    } else {
     (session.measurements || []).forEach((m) => {
       const meta = lesionMeta(m.stria_code);
       drawPolygon(ctx, m.polygon, meta.stroke, meta.soft, lesionCode(m.stria_code), false);
@@ -2965,7 +2997,66 @@ function drawOverlays(ctx) {
         ctx.restore();
       }
     }
+    }
   }
+}
+
+function drawFieldScene(ctx, session) {
+  const roi = drag && drag.type === "fieldroi" ? drag.box : fieldRoiFor(session);
+  if (roi && roi[2] > 0 && roi[3] > 0) {
+    const origin = toScreen([roi[0], roi[1]]);
+    const w = roi[2] * view.zoom;
+    const h = roi[3] * view.zoom;
+    ctx.save();
+    ctx.fillStyle = "rgba(56,189,248,0.08)";
+    ctx.strokeStyle = "#38bdf8";
+    ctx.lineWidth = 1.6;
+    ctx.setLineDash([7, 5]);
+    ctx.fillRect(origin.x, origin.y, w, h);
+    ctx.strokeRect(origin.x, origin.y, w, h);
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#bae6fd";
+    ctx.font = "700 10px Inter, system-ui, sans-serif";
+    ctx.fillText(state.fieldBusy ? "MAPEANDO…" : "ROI DE MAPEAMENTO", origin.x + 6, Math.max(12, origin.y - 6));
+    ctx.restore();
+  }
+
+  const result = fieldResultFor(session);
+  if (!result) return;
+  (result.objects || []).forEach((obj) => {
+    const category = FIELD_CATEGORIES[fieldCategoryIndex(obj)];
+    const screen = (obj.polygon || []).map(toScreen);
+    if (screen.length < 3) return;
+    const selected = state.fieldSelected
+      && state.fieldSelected.sessionId === session.id
+      && state.fieldSelected.id === obj.id;
+    ctx.save();
+    ctx.beginPath();
+    screen.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+    ctx.closePath();
+    ctx.globalAlpha = 0.42;
+    ctx.fillStyle = category.color;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = category.color;
+    ctx.lineWidth = selected ? 2.6 : 1.4;
+    ctx.stroke();
+    const centroid = screen.reduce(
+      (acc, p) => ({ x: acc.x + p.x / screen.length, y: acc.y + p.y / screen.length }),
+      { x: 0, y: 0 },
+    );
+    ctx.font = "800 10px Inter, system-ui, sans-serif";
+    const label = `#${obj.id}`;
+    const width = ctx.measureText(label).width + 10;
+    ctx.fillStyle = "rgba(6,12,17,0.82)";
+    roundRect(ctx, centroid.x - width / 2, centroid.y - 9, width, 18, 5);
+    ctx.fill();
+    ctx.fillStyle = category.color;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, centroid.x, centroid.y);
+    ctx.restore();
+  });
 }
 
 function drawPolygon(ctx, points, color, soft, label, live) {
@@ -3358,6 +3449,19 @@ function onPointerDown(event) {
     }
   }
 
+  if (event.button === 0 && state.step === 4 && state.morphMode === "field" && state.fieldRoiDrawing) {
+    event.preventDefault();
+    const imagePoint = toImage(pt.x, pt.y);
+    press = { x: pt.x, y: pt.y, moved: false, button: 0 };
+    drag = {
+      type: "fieldroi",
+      start: imagePoint,
+      box: [imagePoint[0], imagePoint[1], 0, 0],
+    };
+    canvas.setPointerCapture?.(event.pointerId);
+    return;
+  }
+
   if (event.button === 0 && state.step === 4 && state.autoDrawing) {
     event.preventDefault();
     const imagePoint = toImage(pt.x, pt.y);
@@ -3450,6 +3554,14 @@ function onPointerMove(event) {
     const h = Math.abs(imagePoint[1] - start[1]);
     drag.box = [x, y, w, h];
     scheduleRedraw();
+  } else if (drag && drag.type === "fieldroi") {
+    const start = drag.start;
+    const x = Math.min(start[0], imagePoint[0]);
+    const y = Math.min(start[1], imagePoint[1]);
+    const w = Math.abs(imagePoint[0] - start[0]);
+    const h = Math.abs(imagePoint[1] - start[1]);
+    drag.box = [x, y, w, h];
+    scheduleRedraw();
   } else if (state.step === 4 && state.polygonActive) {
     scheduleRedraw();
   }
@@ -3468,6 +3580,32 @@ function onPointerMove(event) {
     drawLoupe(state.hover);
   } else {
     updateLoupeVisibility();
+  }
+
+  if (state.step === 4 && state.morphMode === "field") {
+    updateFieldTooltip(pt);
+  }
+}
+
+function updateFieldTooltip(screenPoint) {
+  const canvas = $("stage");
+  const tip = $("canvas-tip");
+  if (!canvas || !tip) return;
+  const hit = state.hover ? fieldHitTest(state.hover) : null;
+  if (hit) {
+    const wrap = $("canvas-wrap");
+    const canvasRect = canvas.getBoundingClientRect();
+    const wrapRect = wrap ? wrap.getBoundingClientRect() : canvasRect;
+    tip.hidden = false;
+    tip.dataset.field = "1";
+    tip.textContent = `#${hit.id} · Comp. ${fmt(hit.length_mm, 1)} mm · Larg. ${fmt(hit.mean_width_mm, 2)} mm · ΔE00 ${fmt(hit.delta_e00, 2)}`;
+    tip.style.left = `${canvasRect.left - wrapRect.left + screenPoint.x}px`;
+    tip.style.top = `${canvasRect.top - wrapRect.top + screenPoint.y}px`;
+    canvas.style.cursor = "pointer";
+  } else if (tip.dataset.field === "1") {
+    tip.hidden = true;
+    delete tip.dataset.field;
+    canvas.style.cursor = "crosshair";
   }
 }
 
@@ -3538,6 +3676,38 @@ function onPointerUp(event) {
       renderStepPanel();
       toast("Arraste uma caixa maior ao redor da lesão.", "error");
     }
+    press = null;
+    return;
+  }
+
+  if (drag && drag.type === "fieldroi") {
+    const box = drag.box;
+    drag = null;
+    state.fieldRoiDrawing = false;
+    canvas.releasePointerCapture?.(event.pointerId);
+    const session = activeSession();
+    if (box && box[2] >= 8 && box[3] >= 8 && session) {
+      const bounds = currentImage ? [currentImage.naturalWidth, currentImage.naturalHeight] : null;
+      let [x, y, w, h] = box;
+      if (bounds) {
+        x = Math.max(0, Math.min(bounds[0] - 1, x));
+        y = Math.max(0, Math.min(bounds[1] - 1, y));
+        w = Math.min(w, bounds[0] - x);
+        h = Math.min(h, bounds[1] - y);
+      }
+      state.fieldRois[session.id] = [
+        Math.max(0, Math.floor(x)),
+        Math.max(0, Math.floor(y)),
+        Math.max(1, Math.ceil(w)),
+        Math.max(1, Math.ceil(h)),
+      ];
+      state.fieldSelected = null;
+      toast("ROI de mapeamento definida.", "success", 2600);
+    } else {
+      toast("Arraste uma área maior para a ROI de mapeamento.", "error");
+    }
+    renderStepPanel();
+    scheduleRedraw();
     press = null;
     return;
   }
@@ -3660,6 +3830,16 @@ function handleCanvasClick(point) {
   if (state.step === 4) {
     if (!session.aligned_image_url) {
       toast("Registre o alinhamento no passo 3 antes de medir.", "error");
+      return;
+    }
+    if (state.morphMode === "field") {
+      const hit = fieldHitTest(point);
+      if (hit) {
+        state.fieldSelected = { sessionId: session.id, id: hit.id };
+        renderStepPanel();
+        scheduleRedraw();
+        toast(`Estria #${hit.id} selecionada · escolha L1–L4 no painel para enviar.`, "info", 4200);
+      }
       return;
     }
     if (state.polygon.length >= 200) {
@@ -3863,6 +4043,9 @@ function selectSession(id) {
   state.sessionId = id;
   state.step = 1;
   state.mode = "natural";
+  state.morphMode = "lesions";
+  state.fieldRoiDrawing = false;
+  state.fieldSelected = null;
   syncToolsFromSession();
   renderSidebar();
   renderSessionTabs();
@@ -3983,6 +4166,7 @@ function setStep(step) {
   hideLandmarkPopover();
   if (step !== 3) state.step3Preview = false;
   if (step !== 4) state.autoDrawing = false;
+  if (step !== 4) state.fieldRoiDrawing = false;
   updateHeader();
   renderStepNav();
   renderStepPanel();
@@ -4479,6 +4663,162 @@ async function doRegister() {
 /* --------------------------------------------------------------------------
    Passo 4 — Medição
    -------------------------------------------------------------------------- */
+function fieldResultFor(session) {
+  if (!session) return null;
+  return state.fieldResults[session.id] || null;
+}
+
+function fieldRoiFor(session) {
+  if (!session) return null;
+  return state.fieldRois[session.id] || null;
+}
+
+function fieldCriterionValue(obj) {
+  if (state.fieldCriteria === "length") return Number(obj.length_mm) || 0;
+  if (state.fieldCriteria === "delta") return Number(obj.delta_e00) || 0;
+  return Number(obj.mean_width_mm) || 0;
+}
+
+function fieldThresholds() {
+  const thresholds = state.fieldThresholds[state.fieldCriteria] || [0, 0];
+  return thresholds.map(Number);
+}
+
+function fieldCategoryIndex(obj) {
+  const [first, second] = fieldThresholds();
+  const value = fieldCriterionValue(obj);
+  if (value <= first) return 0;
+  if (value <= second) return 1;
+  return 2;
+}
+
+function fieldCategorySummary(result) {
+  const summary = FIELD_CATEGORIES.map((category) => ({
+    ...category,
+    count: 0,
+    area: 0,
+  }));
+  (result?.objects || []).forEach((obj) => {
+    const index = fieldCategoryIndex(obj);
+    summary[index].count += 1;
+    summary[index].area += Number(obj.area_mm2) || 0;
+  });
+  return summary;
+}
+
+function pointInPolygon(point, polygon) {
+  if (!Array.isArray(polygon) || polygon.length < 3) return false;
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i, i += 1) {
+    const xi = Number(polygon[i][0]);
+    const yi = Number(polygon[i][1]);
+    const xj = Number(polygon[j][0]);
+    const yj = Number(polygon[j][1]);
+    const intersects = ((yi > point[1]) !== (yj > point[1]))
+      && (point[0] < ((xj - xi) * (point[1] - yi)) / ((yj - yi) || 1e-9) + xi);
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+function fieldHitTest(point) {
+  const result = fieldResultFor(activeSession());
+  if (!result) return null;
+  return (result.objects || []).find((obj) => pointInPolygon(point, obj.polygon)) || null;
+}
+
+function fieldSummaryHTML(result) {
+  if (!result) {
+    return `<div class="results-empty">Desenhe uma ROI ampla e clique em “Mapear estrias na ROI”.</div>`;
+  }
+  const summary = result.summary || {};
+  const categories = fieldCategorySummary(result);
+  return `
+    <div class="metric-grid">
+      <div class="metric-card is-accent"><span>Total de estrias</span><strong id="field-total-count">${esc(String(summary.total_count ?? categories.reduce((sum, item) => sum + item.count, 0)))}</strong></div>
+      <div class="metric-card"><span>Área afetada</span><strong><span id="field-total-area">${fmt(summary.total_area_mm2, 1)}</span> <small>mm²</small></strong></div>
+      <div class="metric-card"><span>% da ROI</span><strong><span id="field-coverage">${fmt(summary.coverage_pct, 2)}</span> <small>%</small></strong></div>
+      <div class="metric-card"><span>Área da ROI</span><strong>${fmt(summary.roi_area_mm2, 0)} <small>mm²</small></strong></div>
+    </div>
+    <div class="field-legend" id="field-legend">
+      ${categories.map((category, index) => `
+        <div class="field-legend-item" style="--field-color:${category.color}">
+          <span class="field-legend-dot"></span>
+          <span class="field-legend-name">${esc(category.label)}</span>
+          <span class="field-legend-value"><b id="field-cat-${index}-count">${category.count}</b> estria(s) · <span id="field-cat-${index}-area">${fmt(category.area, 1)}</span> mm²</span>
+        </div>`).join("")}
+    </div>`;
+}
+
+function fieldPanelHTML(session) {
+  const roi = fieldRoiFor(session);
+  const result = fieldResultFor(session);
+  const criteria = FIELD_CRITERIA[state.fieldCriteria];
+  const thresholds = fieldThresholds();
+  const selected = state.fieldSelected && state.fieldSelected.sessionId === session.id
+    ? (result?.objects || []).find((obj) => obj.id === state.fieldSelected.id) || null
+    : null;
+
+  return `
+    <div class="field-scan">
+      <div class="section-title"><span>ROI de mapeamento</span><span>${roi ? `${Math.round(roi[2])} × ${Math.round(roi[3])} px` : "ampla"}</span></div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-soft btn-sm ${state.fieldRoiDrawing ? "is-active" : ""}" data-action="field-draw-roi">
+          ${state.fieldRoiDrawing ? "Arraste a ROI na imagem…" : "Desenhar ROI"}
+        </button>
+        <button type="button" class="btn btn-primary btn-sm" data-action="field-scan" ${roi && !state.fieldBusy ? "" : "disabled"}>
+          ${state.fieldBusy ? "Mapeando…" : "Mapear estrias na ROI"}
+        </button>
+        <button type="button" class="btn btn-danger-ghost btn-sm" data-action="field-clear" ${roi || result ? "" : "disabled"}>Limpar</button>
+      </div>
+      <div class="auto-mode" role="group" aria-label="Perfil colorimétrico do mapeamento">
+        ${[["auto", "Auto"], ["rubra", "Rubra"], ["alba", "Alba"]].map(([value, label]) => `
+          <button type="button" data-field-mode="${value}" class="${state.fieldMode === value ? "is-active" : ""}" aria-pressed="${state.fieldMode === value}">${label}</button>`).join("")}
+      </div>
+      <label class="auto-sensitivity" for="field-sensitivity">
+        <span>Sensibilidade</span>
+        <input id="field-sensitivity" type="range" min="0.1" max="1" step="0.05" value="${state.fieldSensitivity}" />
+        <output id="field-sensitivity-value">${Number(state.fieldSensitivity).toFixed(2)}</output>
+      </label>
+      <div class="field-filter">
+        <label for="field-min-length">Comprimento mín. (mm)
+          <input id="field-min-length" type="number" min="0.5" step="0.5" value="${state.fieldMinLength}" />
+        </label>
+        <label for="field-max-length">Comprimento máx. (mm)
+          <input id="field-max-length" type="number" min="1" step="1" value="${state.fieldMaxLength}" />
+        </label>
+      </div>
+      <p class="form-hint">${roi ? "Ajuste sensibilidade e limites e clique em mapear; a classificação por cores é recalculada no cliente." : "Desenhe uma ROI retangular ampla sobre a área com estrias."}</p>
+    </div>
+
+    <div class="field-classification">
+      <div class="section-title"><span>Classificação por faixas</span><span>tempo real · Quantirides</span></div>
+      <label class="field-criteria" for="field-criteria">
+        <span>Critério</span>
+        <select id="field-criteria">
+          ${Object.entries(FIELD_CRITERIA).map(([value, item]) => `<option value="${value}" ${state.fieldCriteria === value ? "selected" : ""}>${esc(item.label)}</option>`).join("")}
+        </select>
+      </label>
+      ${[0, 1].map((index) => `
+        <label class="auto-sensitivity" for="field-threshold-${index + 1}">
+          <span>Limiar ${index + 1}${criteria.unit ? ` (${criteria.unit})` : ""}</span>
+          <input id="field-threshold-${index + 1}" data-field-threshold="${index}" type="range" min="${criteria.min}" max="${criteria.max}" step="${criteria.step}" value="${thresholds[index]}" />
+          <output id="field-threshold-${index + 1}-value">${fmt(thresholds[index], state.fieldCriteria === "delta" ? 1 : 1)}</output>
+        </label>`).join("")}
+      ${fieldSummaryHTML(result)}
+    </div>
+
+    ${selected ? `
+      <div class="field-selected">
+        <div class="section-title"><span>Estria #${selected.id}</span><span>enviar para lesão-alvo</span></div>
+        <p class="form-hint">Comp. ${fmt(selected.length_mm, 1)} mm · Larg. ${fmt(selected.mean_width_mm, 2)} mm · ΔE00 ${fmt(selected.delta_e00, 2)}</p>
+        <div class="form-actions">
+          ${LESIONS.map((item) => `<button type="button" class="btn btn-ghost btn-sm" data-action="field-assign" data-code="${item.code}">${item.code}</button>`).join("")}
+        </div>
+      </div>` : ""}
+  `;
+}
+
 function step4HTML(session) {
   const meta = lesionMeta(state.stria);
   const current = measurementFor(session, state.stria);
@@ -4561,7 +4901,15 @@ function step4HTML(session) {
       <p class="form-hint">Medição substitui o registro anterior desta região nesta sessão.</p>
     ` : `<div class="results-empty">Nenhuma medição de ${esc(meta.short)} nesta sessão.</div>`}
   `;
-  return stepPanelShell("Morfometria da região-alvo", "Delimite a lesão sobre a imagem alinhada.", body);
+  const modeSwitch = `
+    <div class="morph-mode" role="group" aria-label="Modo de morfometria">
+      <button type="button" data-action="morph-mode" data-mode="lesions" class="${state.morphMode === "lesions" ? "is-active" : ""}" aria-pressed="${state.morphMode === "lesions"}">Lesões-alvo (L1–L4)</button>
+      <button type="button" data-action="morph-mode" data-mode="field" class="${state.morphMode === "field" ? "is-active" : ""}" aria-pressed="${state.morphMode === "field"}">Mapeamento de Campo (ROI)</button>
+    </div>`;
+  const content = `${modeSwitch}${state.morphMode === "field" ? fieldPanelHTML(session) : body}`;
+  return state.morphMode === "field"
+    ? stepPanelShell("Mapeamento de campo (ROI)", "Detecte e classifique múltiplas estrias dentro de uma ROI ampla.", content)
+    : stepPanelShell("Morfometria da região-alvo", "Delimite a lesão sobre a imagem alinhada.", content);
 }
 
 function updatePolygonStatus() {
@@ -4759,6 +5107,98 @@ function pinT0Mask() {
   toast(`Máscara de ${lesionCode(state.stria)} fixada a partir de T0.`, "success", 4200);
 }
 
+async function runFieldScan() {
+  const session = activeSession();
+  if (!session) return;
+  if (!session.aligned_image_url) {
+    toast("Conclua o alinhamento da sessão antes do mapeamento de campo.", "error");
+    return;
+  }
+  if (!session.px_per_mm) {
+    toast("Calibre a régua antes do mapeamento de campo.", "error");
+    return;
+  }
+  const roi = fieldRoiFor(session);
+  if (!roi || roi[2] < 8 || roi[3] < 8) {
+    toast("Desenhe uma ROI retangular ampla antes de mapear.", "error");
+    return;
+  }
+  if (state.fieldBusy) return;
+  state.fieldBusy = true;
+  renderStepPanel();
+  scheduleRedraw();
+  try {
+    const response = await postJSON(sessionEndpoint(session, "/field-scan"), {
+      roi_box: roi.map(Number),
+      mode: state.fieldMode,
+      sensitivity: Number(state.fieldSensitivity),
+      min_length_mm: Number(state.fieldMinLength),
+      max_length_mm: Number(state.fieldMaxLength),
+      min_aspect_ratio: Number(state.fieldMinAspect),
+    });
+    state.fieldResults[session.id] = {
+      objects: Array.isArray(response.objects) ? response.objects : [],
+      summary: response.summary || {},
+    };
+    state.fieldSelected = null;
+    const summary = response.summary || {};
+    toast(
+      `Mapeamento ${state.fieldMode} · ${summary.total_count ?? 0} estria(s) · ${fmt(summary.total_area_mm2, 1)} mm² (${fmt(summary.coverage_pct, 2)}% da ROI)`,
+      "success",
+      5600,
+    );
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    state.fieldBusy = false;
+    renderStepPanel();
+    scheduleRedraw();
+  }
+}
+
+function updateFieldClassificationUI() {
+  const result = fieldResultFor(activeSession());
+  if (!result) return;
+  const categories = fieldCategorySummary(result);
+  categories.forEach((category, index) => {
+    const countNode = $(`field-cat-${index}-count`);
+    const areaNode = $(`field-cat-${index}-area`);
+    if (countNode) countNode.textContent = String(category.count);
+    if (areaNode) areaNode.textContent = fmt(category.area, 1);
+  });
+}
+
+async function assignFieldObject(code) {
+  const session = activeSession();
+  const result = fieldResultFor(session);
+  const selected = result && state.fieldSelected
+    ? (result.objects || []).find((obj) => obj.id === state.fieldSelected.id)
+    : null;
+  if (!session || !selected) {
+    toast("Selecione uma estria detectada no canvas.", "error");
+    return;
+  }
+  setBusy(true, "Enviando estria para a região-alvo…");
+  try {
+    const response = await postJSON(sessionEndpoint(session, "/measure"), {
+      stria_code: lesionCode(code),
+      stria_label: lesionLabel(session, code),
+      polygon: selected.polygon,
+    });
+    toast(
+      `Estria #${selected.id} enviada para ${lesionCode(code)} · ${fmt(response.area_mm2, 1)} mm²`,
+      "success",
+      5200,
+    );
+    await refreshSessions();
+    scheduleRedraw();
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    setBusy(false);
+  }
+}
+
 async function measureStria() {
   const session = activeSession();
   if (!session) return;
@@ -4933,6 +5373,64 @@ function bindStepPanel() {
       if (state.autoBox) scheduleAutoSegment();
     });
   });
+
+  const fieldSensitivity = $("field-sensitivity");
+  if (fieldSensitivity) {
+    fieldSensitivity.addEventListener("input", () => {
+      state.fieldSensitivity = Number(fieldSensitivity.value) || 0.5;
+      const output = $("field-sensitivity-value");
+      if (output) output.textContent = state.fieldSensitivity.toFixed(2);
+    });
+  }
+
+  document.querySelectorAll("[data-field-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.fieldMode = button.dataset.fieldMode || "auto";
+      document.querySelectorAll("[data-field-mode]").forEach((node) => {
+        const active = node === button;
+        node.classList.toggle("is-active", active);
+        node.setAttribute("aria-pressed", String(active));
+      });
+    });
+  });
+
+  const minLength = $("field-min-length");
+  if (minLength) {
+    minLength.addEventListener("change", () => {
+      state.fieldMinLength = Math.max(0.5, Number(minLength.value) || 4);
+    });
+  }
+  const maxLength = $("field-max-length");
+  if (maxLength) {
+    maxLength.addEventListener("change", () => {
+      state.fieldMaxLength = Math.max(1, Number(maxLength.value) || 120);
+    });
+  }
+
+  const criteria = $("field-criteria");
+  if (criteria) {
+    criteria.addEventListener("change", () => {
+      state.fieldCriteria = criteria.value || "width";
+      renderStepPanel();
+      scheduleRedraw();
+    });
+  }
+
+  document.querySelectorAll("[data-field-threshold]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const index = Number(input.dataset.fieldThreshold);
+      const values = [...(state.fieldThresholds[state.fieldCriteria] || [0, 0])];
+      values[index] = Number(input.value) || 0;
+      // Mantém os limiares crescentes sem inverter as faixas.
+      if (index === 0 && values[0] > values[1]) values[1] = values[0];
+      if (index === 1 && values[1] < values[0]) values[0] = values[1];
+      state.fieldThresholds[state.fieldCriteria] = values;
+      const output = $(`field-threshold-${index + 1}-value`);
+      if (output) output.textContent = fmt(values[index], 1);
+      updateFieldClassificationUI();
+      scheduleRedraw();
+    });
+  });
 }
 
 async function saveLesionLabels() {
@@ -5029,6 +5527,40 @@ function handleAction(action, target) {
     }
     case "auto-from-t0": autoSegmentFromT0(); break;
     case "pin-t0-mask": pinT0Mask(); break;
+    case "morph-mode": {
+      state.morphMode = target.dataset.mode === "field" ? "field" : "lesions";
+      state.fieldRoiDrawing = false;
+      state.autoDrawing = false;
+      state.fieldSelected = null;
+      renderStepPanel();
+      scheduleRedraw();
+      break;
+    }
+    case "field-draw-roi": {
+      const session = activeSession();
+      if (!session || !session.aligned_image_url) {
+        toast("Conclua o alinhamento desta sessão antes de mapear.", "error");
+        break;
+      }
+      state.fieldRoiDrawing = !state.fieldRoiDrawing;
+      if (state.fieldRoiDrawing) toast("Arraste uma ROI ampla sobre a área com estrias.", "info", 3600);
+      renderStepPanel();
+      scheduleRedraw();
+      break;
+    }
+    case "field-scan": runFieldScan(); break;
+    case "field-clear": {
+      const session = activeSession();
+      if (!session) break;
+      delete state.fieldRois[session.id];
+      delete state.fieldResults[session.id];
+      state.fieldSelected = null;
+      state.fieldRoiDrawing = false;
+      renderStepPanel();
+      scheduleRedraw();
+      break;
+    }
+    case "field-assign": assignFieldObject(target.dataset.code); break;
     case "close-polygon": closePolygon(); break;
     case "undo-vertex":
       state.polygon.pop();
