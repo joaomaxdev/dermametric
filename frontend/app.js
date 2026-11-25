@@ -380,8 +380,28 @@ function measurementFor(session, code) {
 
 function formatDate(value) {
   if (!value) return "";
-  const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})/);
-  return match ? `${match[3]}/${match[2]}/${match[1]}` : String(value);
+  const text = String(value).trim();
+  if (!text) return "";
+  // Data brasileira explícita (DD/MM/YYYY) — preserva o valor informado.
+  const br = text.match(/^(\d{2})[/-](\d{2})[/-](\d{4})/);
+  if (br) return `${br[1]}/${br[2]}/${br[3]}`;
+  const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[3]}/${iso[2]}/${iso[1]}`;
+  const parsed = parsePatientDate(text);
+  return parsed ? parsed.toLocaleDateString("pt-BR") : "";
+}
+
+function formatResultTimestamp(value) {
+  if (!value) return "Sem data";
+  const parsed = parsePatientDate(value);
+  if (!parsed) return "Sem data";
+  return parsed.toLocaleString("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function dateInputValue(value) {
@@ -1227,8 +1247,17 @@ function parsePatientDate(value) {
   const text = String(value).trim();
   if (!text) return null;
   let normalized = text;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
-    normalized = `${text}T00:00:00Z`;
+  const brazilian = text.match(
+    /^(\d{2})[/-](\d{2})[/-](\d{4})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/,
+  );
+  if (brazilian) {
+    const [, day, month, year, hour = "00", minute = "00", second = "00"] = brazilian;
+    // Data/hora brasileira é um horário de parede: sem fuso, para não
+    // deslocar o dia ao formatar em pt-BR.
+    normalized = `${year}-${month}-${day}T${hour}:${minute}:${second}`;
+  } else if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    // Data sem hora também representa um dia de calendário local.
+    normalized = `${text}T00:00:00`;
   } else if (text.includes("T")) {
     if (!/(Z|[+-]\d{2}:?\d{2})$/.test(text)) normalized = `${text}Z`;
   } else {
@@ -4520,7 +4549,7 @@ function step4HTML(session) {
       </div>` : ""}
 
     ${current ? `
-      <div class="section-title"><span>Resultado de ${esc(lesionLabel(session, current.stria_code, current.stria_label))}</span><span>${new Date(current.created_at).toLocaleString("pt-BR")}</span></div>
+      <div class="section-title"><span>Resultado de ${esc(lesionLabel(session, current.stria_code, current.stria_label))}</span><span>${esc(formatResultTimestamp(current.created_at))}</span></div>
       <div class="metric-grid">
         <div class="metric-card"><span>Comprimento</span><strong>${fmt(current.length_mm, 1)} <small>mm</small></strong></div>
         <div class="metric-card"><span>Largura média</span><strong>${fmt(current.mean_width_mm, 1)} <small>mm</small></strong></div>

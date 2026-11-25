@@ -922,8 +922,9 @@ def measure_stria_polygon(
     """Mede uma região-alvo delimitada por polígono na imagem alinhada.
 
     Calcula área, largura máxima, largura média e comprimento a partir da
-    máscara e do esqueleto (eixo medial), além do contraste perceptual
-    CIEDE2000 entre o interior da região e o anel de pele saudável ao redor.
+    máscara (eixo principal via PCA) e da transformada de distância, além do
+    contraste perceptual CIEDE2000 entre o interior da região e o anel de
+    pele saudável ao redor.
 
     Returns:
         Dicionário com ``length_mm``, ``mean_width_mm``, ``max_width_mm``,
@@ -939,25 +940,33 @@ def measure_stria_polygon(
     pixel_count = int(cv2.countNonZero(mask))
     area_mm2 = pixel_count / (px_per_mm**2)
 
-    # Eixo medial e largura local via transformada de distância.
+    # Comprimento pelo eixo principal (PCA): projeção máxima da máscara na
+    # direção de maior variância. É robusto a ramificações do esqueleto e
+    # consistente com a escala px_per_mm da sessão.
+    ys, xs = np.nonzero(mask)
+    coords = np.column_stack((xs, ys)).astype(np.float64)
+    centered = coords - coords.mean(axis=0)
+    covariance = np.cov(centered, rowvar=False)
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    major_axis = eigenvectors[:, int(np.argmax(eigenvalues))]
+    projection = centered @ major_axis
+    length_px = float(projection.max() - projection.min())
+    if length_px <= 0.0:
+        raise ValueError("Não foi possível medir o comprimento da região-alvo")
+
+    # Largura média geométrica = área / comprimento. Por construção garante
+    # a consistência dimensional ``area_mm2 ≈ length_mm * mean_width_mm``.
+    mean_width_px = float(pixel_count) / length_px
+
+    # Largura máxima via transformada de distância (diâmetro do maior círculo
+    # inscrito). Corrigimos a quantização de meio pixel em cada lado.
     distance = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
-    skeleton = _zhang_suen_thinning(mask)
-    skeleton_coords = np.argwhere(skeleton > 0)
-    if len(skeleton_coords) == 0:
-        raise ValueError("Não foi possível extrair o esqueleto da região-alvo")
-
-    radii = distance[skeleton_coords[:, 0], skeleton_coords[:, 1]]
-    max_radius_px = float(radii.max())
-    mean_radius_px = float(radii.mean())
-
-    # ``distanceTransform`` mede de centro a centro de pixel: a borda física
-    # do polígono está meio pixel além do último pixel interno. Corrigimos
-    # essa quantização em cada lado (largura -= 1 px).
+    max_radius_px = float(distance.max())
     width_quantization_px = 1.0
-    max_width_px = max(0.0, 2.0 * max_radius_px - width_quantization_px)
-    mean_width_px = max(0.0, 2.0 * mean_radius_px - width_quantization_px)
-
-    arc_length_px = _skeleton_arc_length_px(skeleton, mask)
+    max_width_px = max(
+        mean_width_px,
+        max(0.0, 2.0 * max_radius_px - width_quantization_px),
+    )
 
     lab = bgr_to_cielab_float(image)
     stria_lab = _mask_mean_lab(lab, mask)
@@ -966,7 +975,7 @@ def measure_stria_polygon(
     delta_e = float(delta_e_ciede2000(stria_lab, ring_lab))
 
     return {
-        "length_mm": arc_length_px / px_per_mm,
+        "length_mm": length_px / px_per_mm,
         "mean_width_mm": mean_width_px / px_per_mm,
         "max_width_mm": max_width_px / px_per_mm,
         "area_mm2": float(area_mm2),

@@ -578,3 +578,19 @@ def test_auto_segment_ghost_overlay_and_t0_validation():
     assert ".auto-segment" in css
     assert ".auto-sensitivity" in css
     assert ".auto-mode" in css
+
+
+# ---------------------------------------------------------------------------
+# Datas do card "Resultado de <lesão>"
+# ---------------------------------------------------------------------------
+def test_result_card_parses_brazilian_dates():
+    js = _js()
+    # Parse explícito de DD/MM/YYYY antes de exibir no cabeçalho do card.
+    assert "function formatResultTimestamp" in js
+    assert "function parsePatientDate" in js
+    assert r"/^(\d{2})[/-](\d{2})[/-](\d{4})/" in js
+    assert "const brazilian = text.match(" in js
+    assert "formatResultTimestamp(current.created_at)" in js
+    assert 'return "Sem data"' in js
+    # O card não deve delegar a data ao parser nativo (gera "Invalid Date").
+    assert "new Date(current.created_at)" not in js

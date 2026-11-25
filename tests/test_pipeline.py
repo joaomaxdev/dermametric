@@ -308,6 +308,36 @@ def test_measure_synthetic_stria_accuracy():
     print("delta_e_00 esperado:", expected_delta)
 
 
+def test_measure_length_width_and_area_are_dimensionally_consistent():
+    """Comprimento e largura média devem fechar com a área na escala px/mm."""
+    px_per_mm = 8.0
+    expected_length_mm = 40.0
+    expected_width_mm = 4.9
+    x0, y0 = 100.0, 100.0
+    length_px = expected_length_mm * px_per_mm
+    width_px = expected_width_mm * px_per_mm
+    polygon = [
+        [x0, y0],
+        [x0 + length_px, y0],
+        [x0 + length_px, y0 + width_px],
+        [x0, y0 + width_px],
+    ]
+
+    image = np.full((300, 700, 3), SKIN_BGR, dtype=np.uint8)
+    path = TEST_ROOT / "consistent_stria.png"
+    vision.write_image_bgr(path, image)
+
+    metrics = vision.measure_stria_polygon(str(path), polygon, px_per_mm)
+
+    assert metrics["length_mm"] == pytest.approx(expected_length_mm, rel=0.03)
+    assert metrics["mean_width_mm"] == pytest.approx(expected_width_mm, rel=0.05)
+    assert metrics["max_width_mm"] >= metrics["mean_width_mm"]
+    # Consistência dimensional: área ≈ comprimento × largura média.
+    assert metrics["length_mm"] * metrics["mean_width_mm"] == pytest.approx(
+        metrics["area_mm2"], rel=1e-9
+    )
+
+
 # ---------------------------------------------------------------------------
 # 4. Alinhamento por homografia
 # ---------------------------------------------------------------------------
