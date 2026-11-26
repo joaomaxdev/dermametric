@@ -175,9 +175,9 @@ O DermaMetric adota **boas práticas** técnicas de minimização e proteção d
 
 O **DermaMetric** é um software **open-source** gratuito, desenvolvido de forma independente para oferecer fotogrametria clínica de precisão sem mensalidades.
 
-Se o projeto agrega valor à sua clínica, pesquisa ou prática profissional, você pode apoiar o desenvolvimento contínuo via **Pix com chave aleatória (EVP)** — sem expor e-mail ou dados pessoais no código:
+Se o projeto agrega valor à sua clínica, pesquisa ou prática profissional, você pode apoiar o desenvolvimento contínuo via **Pix**
 
-- **Chave Pix aleatória (EVP):** `ab5283df-d213-4266-8a02-380b52cf279f`
+- **Chave Pix:** `ab5283df-d213-4266-8a02-380b52cf279f`
 
 Você também pode apoiar gratuitamente:
 - Deixando uma **Star ⭐** neste repositório;
