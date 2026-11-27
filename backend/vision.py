@@ -592,6 +592,217 @@ def project_roi_inverse(
     return project_roi(roi, inverse, source_shape)
 
 
+# ---------------------------------------------------------------------------
+# 3b. Refinamento elástico local das referências de T0 (pós-homografia)
+# ---------------------------------------------------------------------------
+LOCAL_REFINE_DEFAULT_MARGIN_PX = 90
+LOCAL_REFINE_MIN_CC = 0.45
+LOCAL_REFINE_MAX_SHIFT_MM = 10.0
+
+
+def _local_texture_channel(image_bgr: np.ndarray) -> np.ndarray:
+    """Canal L* com CLAHE local para evidenciar relevo, poros e folículos.
+
+    A cor da estria pode mudar entre sessões, mas o microrelevo da pele
+    permanece estável. Equalizar apenas a luminância destaca esse padrão
+    independentemente do tom da lesão.
+    """
+    lab = bgr_to_cielab_float(image_bgr)
+    lightness = np.clip(lab[..., 0] * 2.55, 0.0, 255.0).astype(np.uint8)
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    enhanced = clahe.apply(lightness)
+    # Suaviza ruído de sensor sem apagar a textura fina.
+    return cv2.GaussianBlur(enhanced, (3, 3), 0).astype(np.float32)
+
+
+def _ecc_warp_local(
+    reference_texture: np.ndarray,
+    current_texture: np.ndarray,
+) -> tuple[float, np.ndarray | None, str | None]:
+    """Estima o warp que leva coordenadas de T0 para a imagem atual.
+
+    ``cv2.findTransformECC(template, input, warp)`` devolve um warp que mapeia
+    ``input`` no espaço de ``template``. Como queremos mover o polígono de T0
+    (input) para a sessão atual (template), passamos a imagem atual como
+    template. Há fallback progressivo para modelos mais restritos.
+    """
+    criteria = (
+        cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
+        50,
+        1e-4,
+    )
+    models = (
+        (cv2.MOTION_AFFINE, "affine"),
+        (cv2.MOTION_EUCLIDEAN, "euclidean"),
+        (cv2.MOTION_TRANSLATION, "translation"),
+    )
+    for motion, label in models:
+        warp = np.eye(2, 3, dtype=np.float32)
+        try:
+            cc, warp = cv2.findTransformECC(
+                current_texture,
+                reference_texture,
+                warp,
+                motion,
+                criteria,
+            )
+        except cv2.error:
+            continue
+        if not np.isfinite(cc) or not np.isfinite(warp).all():
+            continue
+        return float(cc), np.asarray(warp, dtype=np.float64), label
+    return float("nan"), None, None
+
+
+def refine_t0_polygons_local(
+    reference_image_path: str | Path,
+    current_image_path: str | Path,
+    polygons: dict[str, Iterable[Iterable[float]]],
+    px_per_mm: float,
+    *,
+    margin_px: int = LOCAL_REFINE_DEFAULT_MARGIN_PX,
+    min_cc: float = LOCAL_REFINE_MIN_CC,
+    max_shift_mm: float = LOCAL_REFINE_MAX_SHIFT_MM,
+) -> dict[str, dict[str, object]]:
+    """Refina os polígonos de T0 para microdeformações elásticas da pele.
+
+    A homografia global corrige rotação/escala/perspectiva, mas pequenas
+    deformações locais da pele (elasticidade, postura, edema) permanecem entre
+    T0 e T1–Tn. Para cada lesão, recorta-se uma janela ao redor do polígono de
+    T0 nas duas imagens **já alinhadas**, equaliza-se o canal L* e estima-se um
+    warp local por ECC (afim, com fallback euclidiano/translação).
+
+    Travas de segurança: o ajuste só é aplicado se a correlação for pelo menos
+    ``min_cc`` e o deslocamento máximo dos vértices não exceder
+    ``max_shift_mm`` (convertido por ``px_per_mm``). Caso contrário, o polígono
+    de T0 permanece exatamente na posição global.
+
+    Returns:
+        Mapeamento ``código -> {polygon, reference_polygon, applied, cc,
+        shift_mm, max_shift_px, motion, reason, window}``. ``polygon`` já é o
+        polígono refinado quando ``applied`` é verdadeiro.
+    """
+    reference_polygons = {
+        str(code): [[float(x), float(y)] for x, y in points]
+        for code, points in (polygons or {}).items()
+        if points is not None
+    }
+    results: dict[str, dict[str, object]] = {}
+    if not reference_polygons:
+        return results
+
+    def _untouched(points: list[list[float]], reason: str, **extra: object) -> dict[str, object]:
+        result: dict[str, object] = {
+            "polygon": [list(point) for point in points],
+            "reference_polygon": [list(point) for point in points],
+            "applied": False,
+            "cc": None,
+            "shift_mm": 0.0,
+            "max_shift_px": 0.0,
+            "motion": None,
+            "reason": reason,
+            "window": None,
+        }
+        result.update(extra)
+        return result
+
+    scale = float(px_per_mm or 0.0)
+    if scale <= 0:
+        return {
+            code: _untouched(points, "missing_scale")
+            for code, points in reference_polygons.items()
+            if len(points) >= 3
+        }
+
+    reference_image = read_image_bgr(reference_image_path)
+    current_image = read_image_bgr(current_image_path)
+    # As duas imagens estão no mesmo espaço alinhado; usa a interseção dos
+    # limites por segurança caso uma delas tenha sido recortada.
+    height = min(reference_image.shape[0], current_image.shape[0])
+    width = min(reference_image.shape[1], current_image.shape[1])
+    reference_texture_full = _local_texture_channel(reference_image[:height, :width])
+    current_texture_full = _local_texture_channel(current_image[:height, :width])
+    max_shift_px_limit = float(max_shift_mm) * scale
+
+    for code, points in reference_polygons.items():
+        if len(points) < 3:
+            results[code] = _untouched(points, "no_reference_polygon")
+            continue
+
+        xs = [point[0] for point in points]
+        ys = [point[1] for point in points]
+        x0 = max(0, int(np.floor(min(xs))) - int(margin_px))
+        y0 = max(0, int(np.floor(min(ys))) - int(margin_px))
+        x1 = min(width, int(np.ceil(max(xs))) + int(margin_px))
+        y1 = min(height, int(np.ceil(max(ys))) + int(margin_px))
+        if x1 - x0 < 16 or y1 - y0 < 16:
+            results[code] = _untouched(points, "window_too_small")
+            continue
+
+        reference_crop = reference_texture_full[y0:y1, x0:x1]
+        current_crop = current_texture_full[y0:y1, x0:x1]
+        if reference_crop.size == 0 or current_crop.shape != reference_crop.shape:
+            results[code] = _untouched(points, "window_too_small")
+            continue
+
+        cc, warp, motion = _ecc_warp_local(reference_crop, current_crop)
+        window = [x0, y0, x1 - x0, y1 - y0]
+        if warp is None or not np.isfinite(cc):
+            results[code] = _untouched(
+                points, "ecc_failed", window=window
+            )
+            continue
+
+        local_points = np.asarray(
+            [[point[0] - x0, point[1] - y0] for point in points],
+            dtype=np.float64,
+        ).reshape(-1, 1, 2)
+        warped = cv2.transform(local_points, warp).reshape(-1, 2)
+        moved = warped + np.array([x0, y0], dtype=np.float64)
+        original = np.asarray(points, dtype=np.float64)
+        max_shift_px = float(np.max(np.linalg.norm(moved - original, axis=1)))
+        shift_mm = max_shift_px / scale
+
+        if cc < float(min_cc):
+            results[code] = _untouched(
+                points,
+                "low_correlation",
+                cc=cc,
+                motion=motion,
+                window=window,
+                max_shift_px=max_shift_px,
+                shift_mm=shift_mm,
+            )
+            continue
+        if max_shift_px > max_shift_px_limit:
+            results[code] = _untouched(
+                points,
+                "shift_exceeds_limit",
+                cc=cc,
+                motion=motion,
+                window=window,
+                max_shift_px=max_shift_px,
+                shift_mm=shift_mm,
+            )
+            continue
+        if not np.isfinite(moved).all():
+            results[code] = _untouched(points, "ecc_failed", window=window)
+            continue
+
+        results[code] = {
+            "polygon": [[float(x), float(y)] for x, y in moved],
+            "reference_polygon": [list(point) for point in points],
+            "applied": True,
+            "cc": cc,
+            "shift_mm": shift_mm,
+            "max_shift_px": max_shift_px,
+            "motion": motion,
+            "reason": "ok",
+            "window": window,
+        }
+    return results
+
+
 def _validate_roi(roi: Iterable[int], width: int, height: int) -> tuple[int, int, int, int]:
     x, y, w, h = (int(v) for v in roi)
     if w <= 0 or h <= 0:

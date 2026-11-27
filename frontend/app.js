@@ -359,10 +359,19 @@ function referenceHealthyRoi() {
   return Array.isArray(roi) && roi.length === 4 ? roi.map(Number) : null;
 }
 
-/** ROIs (polígonos) medidas em T0, normalizadas para L1..L4. */
+/** ROIs (polígonos) medidas em T0, normalizadas para L1..L4.
+ *
+ * Em T1–Tn, quando o backend já calculou o refinamento elástico local, usa o
+ * polígono de T0 ajustado à microdeformação da pele desta sessão. O polígono
+ * original fica disponível como ``referencePoints`` para rastreabilidade.
+ */
 function referenceRois() {
   const t0 = baselineSession();
   if (!t0 || !Array.isArray(t0.measurements)) return [];
+  const session = activeSession();
+  const local = session && !isBaseline(session)
+    ? (session.local_alignment?.polygons || null)
+    : null;
   const seen = new Set();
   const rois = [];
   t0.measurements.forEach((measurement) => {
@@ -370,9 +379,16 @@ function referenceRois() {
     const code = lesionCode(measurement.stria_code);
     if (seen.has(code)) return;
     seen.add(code);
+    const entry = local ? local[code] || local[measurement.stria_code] : null;
+    const refined = entry && Array.isArray(entry.polygon) && entry.polygon.length >= 3
+      ? entry.polygon
+      : null;
+    const points = (refined || measurement.polygon).map((point) => [Number(point[0]), Number(point[1])]);
     rois.push({
       code,
-      points: measurement.polygon.map((point) => [Number(point[0]), Number(point[1])]),
+      points,
+      referencePoints: measurement.polygon.map((point) => [Number(point[0]), Number(point[1])]),
+      localAdjustment: entry && entry.applied ? entry : null,
     });
   });
   return rois;
@@ -388,6 +404,38 @@ function ghostRois() {
   const measured = new Set((session?.measurements || []).map((m) => lesionCode(m.stria_code)));
   // Medidas continuam visíveis como referência, mas com marcação discreta.
   return referenceRois().map((roi) => ({ ...roi, measured: measured.has(roi.code) }));
+}
+
+let localAlignmentRequest = null;
+
+/**
+ * Carrega do backend os polígonos de T0 refinados localmente para a sessão
+ * ativa. O resultado fica em ``session.local_alignment`` (também persistido
+ * no servidor) e alimenta fantasma, "Fixar máscara" e seed do auto-ajuste.
+ */
+async function loadLocalAlignment(session) {
+  if (!session || isBaseline(session) || !session.aligned_image_url) return;
+  if (session.local_alignment?.polygons && Object.keys(session.local_alignment.polygons).length) return;
+  if (localAlignmentRequest === session.id) return;
+  localAlignmentRequest = session.id;
+  try {
+    const data = await api(sessionEndpoint(session, "/reference-polygons"));
+    session.local_alignment = {
+      reference_session_id: data.reference_session_id,
+      applied: Boolean(data.applied),
+      polygons: data.polygons || {},
+      px_per_mm: data.px_per_mm,
+    };
+    if (state.sessionId === session.id) {
+      renderStepPanel();
+      scheduleRedraw();
+    }
+  } catch (error) {
+    // Sem refinamento local o fluxo continua usando o polígono global de T0.
+    console.warn("Refinamento elástico local indisponível:", error);
+  } finally {
+    if (localAlignmentRequest === session.id) localAlignmentRequest = null;
+  }
 }
 
 function lesionMeta(code) {
@@ -4276,6 +4324,7 @@ function setStep(step) {
   renderResults();
   view.autoFit = true;
   renderCanvas();
+  if (step === 4) loadLocalAlignment(activeSession());
 }
 
 function stepCompletion() {
@@ -4959,6 +5008,10 @@ function step4HTML(session) {
   const t0Roi = isAlignedSpace()
     ? referenceRois().find((roi) => roi.code === lesionCode(state.stria)) || null
     : null;
+  const localAdjustment = t0Roi?.localAdjustment || null;
+  const localShiftLabel = localAdjustment
+    ? `${(Number(localAdjustment.shift_mm) || 0).toFixed(1).replace(".", ",")} mm`
+    : "";
 
   const lesionInputs = LESIONS.map((item) => `
     <div class="lesion-label-row">
@@ -4991,7 +5044,11 @@ function step4HTML(session) {
         <button type="button" class="btn btn-ghost btn-sm ${state.scaleGuide ? "is-active" : ""}" data-action="toggle-scale" aria-pressed="${state.scaleGuide}">
           Régua mm
         </button>
-      </div>` : (session.px_per_mm ? `
+      </div>
+      ${localAdjustment ? `
+        <p class="form-hint is-local-adjust" title="Microdeformação elástica estimada por correlação de textura (ECC)">
+          Ajuste elástico local: +${localShiftLabel}${localAdjustment.cc != null ? ` · ECC ${Number(localAdjustment.cc).toFixed(2)}` : ""}
+        </p>` : ""}` : (session.px_per_mm ? `
       <div class="form-actions">
         <button type="button" class="btn btn-ghost btn-sm ${state.scaleGuide ? "is-active" : ""}" data-action="toggle-scale" aria-pressed="${state.scaleGuide}">
           Régua e grade em mm
@@ -5398,6 +5455,10 @@ async function measureStria() {
       5200,
     );
     await refreshSessions();
+    // Novas medições em T0 mudam as referências; invalida o refinamento
+    // elástico local em cache para que seja recalculado ao reabrir o passo 4.
+    Object.values(state.sessions).forEach((item) => { delete item.local_alignment; });
+    if (!isBaseline(session)) loadLocalAlignment(activeSession());
     scheduleRedraw();
   } catch (error) {
     if (state.polygon.length >= 3) state.polygonActive = true;

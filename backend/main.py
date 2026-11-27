@@ -986,6 +986,100 @@ def auto_segment(
     return {"session_id": session_id, **result}
 
 
+def _t0_reference_polygons(session: dict[str, Any] | None) -> dict[str, list[list[float]]]:
+    """Polígonos L1–L4 medidos no T0, no espaço alinhado do T0."""
+    polygons: dict[str, list[list[float]]] = {}
+    if not session:
+        return polygons
+    for measurement in session.get("measurements") or []:
+        code = str(measurement.get("stria_code") or "").strip()
+        polygon = measurement.get("polygon")
+        if not code or not isinstance(polygon, list) or len(polygon) < 3:
+            continue
+        if code in polygons:
+            continue
+        polygons[code] = [
+            [float(point[0]), float(point[1])]
+            for point in polygon
+            if isinstance(point, (list, tuple)) and len(point) >= 2
+        ]
+    return {code: points for code, points in polygons.items() if len(points) >= 3}
+
+
+@app.get("/api/sessions/{session_id}/reference-polygons")
+def reference_polygons(session_id: str) -> dict[str, Any]:
+    """Referências L1–L4 de T0 já refinadas localmente para esta sessão.
+
+    A homografia global alinha a foto inteira, mas a pele ainda sofre
+    microdeformações elásticas. Este endpoint estima, lesão a lesão, um warp
+    local por ECC sobre a textura da pele e devolve os polígonos de T0
+    ajustados (ou intactos, quando as travas de segurança são acionadas). O
+    resultado é registrado em ``sessions.local_alignment_json``.
+    """
+    row = _require_session(session_id)
+    if _session_code(row) == "T0":
+        metadata = {
+            "reference_session_id": row["id"],
+            "applied": False,
+            "polygons": {},
+            "px_per_mm": float(row["px_per_mm"] or 0.0),
+        }
+        return {"session_id": session_id, **metadata}
+
+    t0_row = _require_session(_reference_t0_id(row))
+    t0_session = db.get_session(t0_row["id"])
+    t0_polygons = _t0_reference_polygons(t0_session)
+    scale = float(row["px_per_mm"] or 0.0)
+
+    def _fallback(reason: str) -> dict[str, Any]:
+        return {
+            code: {
+                "polygon": [list(point) for point in points],
+                "reference_polygon": [list(point) for point in points],
+                "applied": False,
+                "cc": None,
+                "shift_mm": 0.0,
+                "max_shift_px": 0.0,
+                "motion": None,
+                "reason": reason,
+                "window": None,
+            }
+            for code, points in t0_polygons.items()
+        }
+
+    if not t0_polygons:
+        refined = {}
+    elif not row["aligned_image_path"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Conclua o alinhamento da sessão antes de obter as referências de T0",
+        )
+    elif not t0_row["aligned_image_path"]:
+        refined = _fallback("reference_not_aligned")
+    elif scale <= 0:
+        refined = _fallback("missing_scale")
+    else:
+        with _materialized(t0_row["aligned_image_path"]) as t0_path, _materialized(
+            row["aligned_image_path"]
+        ) as current_path:
+            refined = _vision_call(
+                vision.refine_t0_polygons_local,
+                str(t0_path),
+                str(current_path),
+                t0_polygons,
+                scale,
+            )
+
+    metadata = {
+        "reference_session_id": t0_row["id"],
+        "applied": any(bool(item.get("applied")) for item in refined.values()),
+        "polygons": refined,
+        "px_per_mm": scale,
+    }
+    db.update_session(session_id, local_alignment_json=metadata)
+    return {"session_id": session_id, **metadata}
+
+
 @app.post("/api/sessions/{session_id}/field-scan")
 def field_scan(
     session_id: str, payload: FieldScanRequest

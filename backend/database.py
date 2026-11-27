@@ -95,6 +95,7 @@ _SESSION_SCHEMA = """CREATE TABLE IF NOT EXISTS sessions (
     clinical_scales_json TEXT,
     roi_mode TEXT,
     roi_warnings_json TEXT,
+    local_alignment_json TEXT,
     updated_at TEXT NOT NULL
 );"""
 
@@ -240,6 +241,7 @@ def init_db() -> None:
         _ensure_column(conn, "striae_measurements", "delta_e_00", "REAL")
         _ensure_column(conn, "sessions", "roi_mode", "TEXT")
         _ensure_column(conn, "sessions", "roi_warnings_json", "TEXT")
+        _ensure_column(conn, "sessions", "local_alignment_json", "TEXT")
         conn.execute(
             "UPDATE sessions SET session_code = id"
             " WHERE session_code IS NULL OR session_code = ''"
@@ -372,6 +374,7 @@ def _serialize_session(row: dict[str, Any]) -> dict[str, Any]:
     ruler_points = _json_or_none(_decrypt_text(session.get("ruler_points_json")))
     roi = _json_or_none(_decrypt_text(session.get("healthy_skin_roi_json")))
     roi_warnings = _json_or_none(_decrypt_text(session.get("roi_warnings_json"))) or []
+    local_alignment = _json_or_none(_decrypt_text(session.get("local_alignment_json")))
 
     session["code"] = session.get("session_code") or session_id
     session["patient_id"] = session.get("patient_id")
@@ -383,6 +386,7 @@ def _serialize_session(row: dict[str, Any]) -> dict[str, Any]:
     session["healthy_skin_roi"] = roi
     session["roi_mode"] = session.get("roi_mode") or ("reference" if session_id == "T0" else None)
     session["roi_warnings"] = roi_warnings if isinstance(roi_warnings, list) else []
+    session["local_alignment"] = local_alignment if isinstance(local_alignment, dict) else None
 
     clean_path = session.get("clean_image_path")
     ruler_path = session.get("ruler_image_path")
@@ -570,9 +574,10 @@ def update_session(session_id: str, **updates) -> dict[str, Any] | None:
     allowed = {"label", "captured_at", "px_per_mm", "ruler_points_json", "landmarks_json",
                "healthy_skin_roi_json", "aligned_image_path", "enhanced_image_path",
                "ruler_image_path", "clean_image_path", "lesion_labels_json", "clinical_scales_json",
-               "roi_mode", "roi_warnings_json"}
+               "roi_mode", "roi_warnings_json", "local_alignment_json"}
     encrypted_json_fields = {"ruler_points_json", "landmarks_json", "healthy_skin_roi_json",
-                             "lesion_labels_json", "clinical_scales_json", "roi_warnings_json"}
+                             "lesion_labels_json", "clinical_scales_json", "roi_warnings_json",
+                             "local_alignment_json"}
     with connection() as conn:
         sets = []
         args = []

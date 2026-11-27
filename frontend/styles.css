@@ -2603,6 +2603,25 @@ body.has-modal { overflow: hidden; }
 
 .form-hint.is-warning { color: #fcd34d; }
 
+.form-hint.is-local-adjust {
+  color: #7dd3fc;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+
+.form-hint.is-local-adjust::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #38bdf8;
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.16);
+}
+
 .gais-blind {
   display: flex;
   align-items: center;

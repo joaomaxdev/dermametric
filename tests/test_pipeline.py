@@ -727,6 +727,41 @@ def test_api_full_flow_and_persistence(client):
     assert len(session_rows) == 4
 
 
+def test_reference_polygons_local_refinement_endpoint(client):
+    """Referências de T0 chegam refinadas e ficam registradas na sessão."""
+    response = client.get("/api/sessions/T2/reference-polygons")
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    assert body["reference_session_id"] == "T0"
+    reference = body["polygons"]["E1_maior"]
+    assert len(reference["polygon"]) >= 3
+    assert reference["shift_mm"] >= 0
+    assert reference["reason"] in {
+        "ok",
+        "low_correlation",
+        "shift_exceeds_limit",
+        "ecc_failed",
+        "missing_scale",
+    }
+    if reference["applied"]:
+        assert reference["cc"] >= vision.LOCAL_REFINE_MIN_CC
+    else:
+        assert reference["polygon"] == reference["reference_polygon"]
+
+    # O resultado é persistido nos metadados técnicos da sessão.
+    session = client.get("/api/sessions/T2").json()
+    stored = session["local_alignment"]["polygons"]["E1_maior"]
+    assert stored["polygon"] == reference["polygon"]
+    assert stored["reason"] == reference["reason"]
+    assert session["local_alignment"]["reference_session_id"] == "T0"
+
+    # T0 não é referência de si mesmo.
+    baseline = client.get("/api/sessions/T0/reference-polygons").json()
+    assert baseline["polygons"] == {}
+    assert baseline["applied"] is False
+
+
 # ---------------------------------------------------------------------------
 # 7. Edição granular, EXIF, landmarks nomeados e criptografia em repouso
 # ---------------------------------------------------------------------------

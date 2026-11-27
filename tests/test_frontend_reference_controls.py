@@ -125,3 +125,27 @@ def test_roi_visual_alerts_and_scale_css():
     assert stage and "position: absolute" in stage.group(1)
     assert "transform-origin" in stage.group(1)
     assert ".compare-zoom" in css
+
+
+def test_local_elastic_refinement_feeds_t0_references():
+    js = _js()
+    assert "async function loadLocalAlignment(session)" in js
+    assert "/reference-polygons" in js
+    assert "local_alignment" in js
+    assert "Ajuste elástico local" in js
+    assert ".is-local-adjust" in _css()
+
+    rois = js.split("function referenceRois()", 1)[1].split("\n}", 1)[0]
+    assert "localAdjustment" in rois
+    assert "referencePoints" in rois
+    assert "entry.polygon" in rois
+
+    # Fantasma, "Fixar máscara" e seed de auto-ajuste usam referenceRois().
+    ghost = js.split("function ghostRois()", 1)[1].split("\n}", 1)[0]
+    assert "referenceRois()" in ghost
+    pin = js.split("function pinT0Mask()", 1)[1].split("\n}", 1)[0]
+    assert "referenceRoiForActive()" in pin
+    seed = js.split("function autoSegmentFromT0()", 1)[1].split("\n}", 1)[0]
+    assert "referenceRoiForActive()" in seed
+    active = js.split("function referenceRoiForActive()", 1)[1].split("\n}", 1)[0]
+    assert "referenceRois()" in active
