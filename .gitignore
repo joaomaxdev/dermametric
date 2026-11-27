@@ -27,6 +27,7 @@ storage/.work/
 tests/tmp/
 tests/tmp_backup/
 tests/tmp_auto_segment/
+tests/tmp_field_scan/
 tests/output/
 
 # Backups locais (snapshots pre_restore e exportações)

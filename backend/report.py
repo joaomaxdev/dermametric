@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import math
 from datetime import datetime
 from typing import Any, Iterable
 from xml.sax.saxutils import escape
@@ -369,7 +370,39 @@ def _roi_summary(session: dict[str, Any]) -> str:
     if not isinstance(roi, (list, tuple)) or len(roi) < 4:
         return "—"
     x, y, w, h = roi[:4]
-    return f"x={_fmt(x, 0)} y={_fmt(y, 0)} · {_fmt(w, 0)}×{_fmt(h, 0)} px"
+    mode = session.get("roi_mode")
+    suffix = {
+        "reference": " · referência T0",
+        "reprojected_t0": " · reprojetada do T0",
+        "manual": " · ajuste manual",
+    }.get(str(mode or ""), "")
+    return f"x={_fmt(x, 0)} y={_fmt(y, 0)} · {_fmt(w, 0)}×{_fmt(h, 0)} px{suffix}"
+
+
+def _warning_messages(items: Any) -> list[str]:
+    messages: list[str] = []
+    if not isinstance(items, (list, tuple)):
+        return messages
+    for item in items:
+        if isinstance(item, dict):
+            message = str(item.get("message") or item.get("code") or "").strip()
+        else:
+            message = str(item).strip()
+        if message:
+            messages.append(message)
+    return messages
+
+
+def _session_warnings(session: dict[str, Any]) -> list[str]:
+    return _warning_messages(session.get("roi_warnings"))
+
+
+def _measurement_warnings(session: dict[str, Any], code: str) -> list[str]:
+    measurement = _measurement(session, code) or {}
+    metrics = measurement.get("metrics")
+    if not isinstance(metrics, dict):
+        metrics = {}
+    return _warning_messages(metrics.get("technical_warnings"))
 
 
 def _fingerprint(patient: dict[str, Any], sessions: list[dict[str, Any]]) -> str:
@@ -697,6 +730,20 @@ def _methodology(sessions: list[dict[str, Any]]) -> list[Any]:
     table.setStyle(_grid_style())
     story.append(Spacer(1, 4))
     story.append(table)
+
+    warning_lines: list[str] = []
+    for session in sessions:
+        for message in _session_warnings(session):
+            warning_lines.append(f"{_text(_code(session))}: {_text(message)}")
+    if warning_lines:
+        story.append(Spacer(1, 3))
+        story.append(
+            Paragraph(
+                "<b>Avisos técnicos da ROI de pele sadia:</b> "
+                + " ".join(warning_lines),
+                styles["small"],
+            )
+        )
     return story
 
 
@@ -908,6 +955,166 @@ def _draw_dashed_rect(
         )
 
 
+def _metric_step_px(px_per_mm: float) -> float:
+    """Passo de grade legível (10/20/50 mm) conforme a escala da foto."""
+    for step_mm in (10.0, 20.0, 50.0, 100.0):
+        if step_mm * px_per_mm >= 26.0:
+            return step_mm * px_per_mm
+    return 10.0 * px_per_mm
+
+
+def _draw_metric_grid(image: Any, px_per_mm: Any) -> None:
+    """Grade métrica sutil e eixos em mm sobre uma cópia da imagem.
+
+    A grade nunca é aplicada aos dados originais (a imagem recebida é uma
+    cópia) e usa alfa baixo para não competir com os contornos coloridos.
+    """
+    try:
+        scale = float(px_per_mm or 0)
+    except (TypeError, ValueError):
+        return
+    if scale <= 0:
+        return
+    try:
+        import cv2
+        import numpy as np
+    except Exception:  # noqa: BLE001 - OpenCV indisponível
+        return
+
+    height, width = image.shape[:2]
+    step = _metric_step_px(scale)
+    if step < 6:
+        return
+    overlay = image.copy()
+    for x in np.arange(step, width, step):
+        cv2.line(overlay, (int(round(x)), 0), (int(round(x)), height), (255, 255, 255), 1)
+    for y in np.arange(step, height, step):
+        cv2.line(overlay, (0, int(round(y))), (width, int(round(y))), (255, 255, 255), 1)
+    cv2.addWeighted(overlay, 0.10, image, 0.90, 0, image)
+
+    # Eixos: ticks de 10 mm na borda superior e esquerda.
+    tick = max(4, int(round(min(width, height) * 0.006)))
+    for x in np.arange(0, width, 10.0 * scale):
+        cv2.line(
+            image, (int(round(x)), 0), (int(round(x)), tick), (210, 225, 220), 1
+        )
+    for y in np.arange(0, height, 10.0 * scale):
+        cv2.line(
+            image, (0, int(round(y))), (tick, int(round(y))), (210, 225, 220), 1
+        )
+
+
+def _corner_for_scale(
+    image: Any, avoid_points: Iterable[Iterable[float]]
+) -> tuple[int, int]:
+    """Canto com menos marcações, para a régua não cobrir contornos."""
+    height, width = image.shape[:2]
+    points = [
+        (float(point[0]), float(point[1]))
+        for point in avoid_points
+        if point is not None and len(point) >= 2
+    ]
+    zones = {
+        (0, 0): (0.0, 0.0),
+        (1, 0): (width * 0.7, 0.0),
+        (0, 1): (0.0, height * 0.8),
+        (1, 1): (width * 0.7, height * 0.8),
+    }
+    best = (0, 1)
+    best_count = math.inf
+    for key, (x0, y0) in zones.items():
+        x1 = x0 + width * 0.3
+        y1 = y0 + height * 0.2
+        count = sum(1 for x, y in points if x0 <= x <= x1 and y0 <= y <= y1)
+        if count < best_count:
+            best_count = count
+            best = key
+    return best
+
+
+def _draw_metric_scale(
+    image: Any,
+    px_per_mm: Any,
+    avoid_points: Iterable[Iterable[float]] = (),
+) -> None:
+    """Régua milimetrada legível na imagem anotada (mm conforme px/mm)."""
+    try:
+        scale = float(px_per_mm or 0)
+    except (TypeError, ValueError):
+        return
+    if scale <= 0:
+        return
+    try:
+        import cv2
+    except Exception:  # noqa: BLE001 - OpenCV indisponível
+        return
+
+    height, width = image.shape[:2]
+    max_bar = width * 0.24
+    candidates = [1, 2, 5, 10, 20, 50, 100]
+    bar_mm = 1
+    for value in candidates:
+        if value * scale <= max_bar:
+            bar_mm = value
+    bar_px = max(6.0, bar_mm * scale)
+
+    corner = _corner_for_scale(image, avoid_points)
+    margin = max(12, int(round(min(width, height) * 0.02)))
+    left = corner[0] == 0
+    top = corner[1] == 0
+    x0 = margin if left else int(width - margin - bar_px)
+    y0 = margin + 26 if top else int(height - margin - 26)
+    x0 = max(8, min(width - int(bar_px) - 8, x0))
+    y0 = max(8, min(height - 26, y0))
+
+    pad = 8
+    overlay = image.copy()
+    cv2.rectangle(
+        overlay,
+        (x0 - pad, y0 - 26),
+        (x0 + int(bar_px) + pad, y0 + 16),
+        (12, 22, 28),
+        -1,
+    )
+    cv2.addWeighted(overlay, 0.62, image, 0.38, 0, image)
+
+    segments = max(1, int(bar_mm))
+    segment_px = bar_px / segments
+    for index in range(segments):
+        start = int(round(x0 + index * segment_px))
+        stop = int(round(x0 + (index + 1) * segment_px))
+        color = (240, 240, 240) if index % 2 == 0 else (25, 30, 34)
+        cv2.rectangle(image, (start, y0), (max(start + 1, stop), y0 + 9), color, -1)
+    cv2.rectangle(
+        image,
+        (x0, y0),
+        (x0 + int(bar_px), y0 + 9),
+        (235, 240, 240),
+        1,
+        cv2.LINE_AA,
+    )
+
+    font = 0.42 if min(width, height) < 900 else 0.5
+    cv2.putText(
+        image, "0", (x0, y0 - 8), cv2.FONT_HERSHEY_SIMPLEX, font,
+        (235, 244, 244), 1, cv2.LINE_AA,
+    )
+    label = f"{bar_mm:g} mm"
+    (tw, _th), _base = cv2.getTextSize(
+        label, cv2.FONT_HERSHEY_SIMPLEX, font, 1
+    )
+    cv2.putText(
+        image,
+        label,
+        (x0 + int(bar_px) - tw, y0 - 8),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font,
+        (235, 244, 244),
+        1,
+        cv2.LINE_AA,
+    )
+
+
 def _annotate_lesion_map(
     image: Any,
     session: dict[str, Any],
@@ -915,20 +1122,33 @@ def _annotate_lesion_map(
     colors: dict[str, tuple[int, int, int]],
 ) -> bytes | None:
     annotated = image.copy()
-    _draw_dashed_rect(
-        annotated, session.get("healthy_skin_roi"), (0, 158, 140),
-        "ROI pele sadia",
-    )
+    px_per_mm = session.get("px_per_mm")
+    _draw_metric_grid(annotated, px_per_mm)
+
+    avoid_points: list[Iterable[float]] = []
+    roi = session.get("healthy_skin_roi")
+    if isinstance(roi, (list, tuple)) and len(roi) >= 4:
+        x, y, w, h = (float(value) for value in roi[:4])
+        avoid_points.extend(
+            [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
+        )
     for code in codes:
         measurement = _measurement(session, code)
         if not measurement:
             continue
+        polygon = measurement.get("polygon") or []
+        avoid_points.extend(polygon)
         _draw_polygon(
             annotated,
-            measurement.get("polygon") or [],
+            polygon,
             colors.get(code, (0, 150, 136)),
             code,
         )
+    _draw_dashed_rect(
+        annotated, session.get("healthy_skin_roi"), (0, 158, 140),
+        "ROI pele sadia",
+    )
+    _draw_metric_scale(annotated, px_per_mm, avoid_points)
     return _encode_png(_fit_image(annotated, 1100))
 
 
@@ -1525,6 +1745,23 @@ def _lesion_block(
     table.setStyle(_grid_style())
     block.append(Spacer(1, 3 * mm))
     block.append(table)
+
+    geometry_warnings: list[str] = []
+    for session in measured:
+        for message in _measurement_warnings(session, code):
+            geometry_warnings.append(
+                f"{_text(_code(session))}: {_text(message)}"
+            )
+    if geometry_warnings:
+        block.append(Spacer(1, 2 * mm))
+        block.append(
+            Paragraph(
+                "<b>Avisos técnicos de geometria:</b> "
+                + " ".join(geometry_warnings),
+                styles["small"],
+            )
+        )
+
     block.append(Spacer(1, 2.5 * mm))
     block.append(
         _lesion_synthesis(code, baseline, latest, baseline_metrics, latest_metrics)

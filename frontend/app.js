@@ -107,7 +107,11 @@ const state = {
   landmarks: [],
   roi: null,
   roiDrawing: false,
+  roiManual: false,
+  roiWarnings: [],
   step3Preview: false,
+  ghost: { enabled: true, opacity: 0.45 },
+  scaleGuide: true,
   files: {},
   polygon: [],
   polygonActive: false,
@@ -141,7 +145,10 @@ const state = {
   hover: null,
   hoverHit: null,
   landmarkPopover: null,
-  compare: { sessionId: "T2", mode: "natural", anon: false, pos: 50 },
+  compare: {
+    sessionId: "T2", mode: "natural", anon: false, pos: 50,
+    zoom: 1, panX: 0, panY: 0,
+  },
   backupSummary: null,
   profileTab: "profile",
   patientTab: "manual",
@@ -371,13 +378,16 @@ function referenceRois() {
   return rois;
 }
 
-/** ROIs de T0 ainda não medidas nesta sessão, desenhadas como guia fantasma. */
+/**
+ * ROIs de T0 (L1–L4) no espaço alinhado, desenhadas como guia fantasma.
+ * O usuário pode ocultar o guia ou ajustar a opacidade no passo 4.
+ */
 function ghostRois() {
-  if (!isAlignedSpace()) return [];
+  if (!isAlignedSpace() || !state.ghost?.enabled) return [];
   const session = activeSession();
   const measured = new Set((session?.measurements || []).map((m) => lesionCode(m.stria_code)));
-  const activeCode = state.polygon.length ? lesionCode(state.stria) : null;
-  return referenceRois().filter((roi) => !measured.has(roi.code) && roi.code !== activeCode);
+  // Medidas continuam visíveis como referência, mas com marcação discreta.
+  return referenceRois().map((roi) => ({ ...roi, measured: measured.has(roi.code) }));
 }
 
 function lesionMeta(code) {
@@ -2947,9 +2957,13 @@ function drawOverlays(ctx) {
       markerCaption(ctx, p.x, p.y + 19, point.label || `Ponto ${index + 1}`);
     });
 
+    const editableRoi = drag && drag.type === "roi" ? drag.roi : state.roi;
+    const alignedRoi = Array.isArray(session.healthy_skin_roi)
+      ? session.healthy_skin_roi
+      : referenceHealthyRoi();
     const roi = useReference
-      ? referenceHealthyRoi()
-      : (drag && drag.type === "roi" ? drag.roi : state.roi);
+      ? alignedRoi
+      : ((isBaseline(session) || state.roiManual) ? editableRoi : null);
     if (roi) {
       const a = toScreen([roi[0], roi[1]]);
       const w = roi[2] * zoom;
@@ -2999,6 +3013,8 @@ function drawOverlays(ctx) {
     }
     }
   }
+
+  if (state.step >= 2) drawScaleGuide(ctx);
 }
 
 function drawFieldScene(ctx, session) {
@@ -3059,6 +3075,88 @@ function drawFieldScene(ctx, session) {
   });
 }
 
+/**
+ * Régua e grade métricas sobre a imagem do paciente (mm conforme px/mm).
+ * A grade usa alfa baixo e a régua é ancorada no canto inferior esquerdo,
+ * fora da área de desenho mais provável, para não obstruir contornos.
+ */
+function drawScaleGuide(ctx) {
+  const session = activeSession();
+  const pxPerMm = Number(session?.px_per_mm) || 0;
+  if (!state.scaleGuide || pxPerMm <= 0 || !currentImage) return;
+  const zoom = view.zoom;
+  const imageW = currentImage.naturalWidth;
+  const imageH = currentImage.naturalHeight;
+  if (!imageW || !imageH || zoom <= 0) return;
+
+  // Passo de grade legível: no mínimo ~24 px na tela.
+  let stepMm = 10;
+  while (stepMm * pxPerMm * zoom < 24 && stepMm < 200) stepMm *= 2;
+
+  const origin = toScreen([0, 0]);
+  const end = toScreen([imageW, imageH]);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(origin.x, origin.y, end.x - origin.x, end.y - origin.y);
+  ctx.clip();
+  ctx.strokeStyle = "rgba(255,255,255,0.18)";
+  ctx.lineWidth = 1;
+  for (let x = 0; x <= imageW; x += stepMm * pxPerMm) {
+    const p = toScreen([x, 0]);
+    ctx.beginPath();
+    ctx.moveTo(Math.round(p.x) + 0.5, origin.y);
+    ctx.lineTo(Math.round(p.x) + 0.5, end.y);
+    ctx.stroke();
+  }
+  for (let y = 0; y <= imageH; y += stepMm * pxPerMm) {
+    const p = toScreen([0, y]);
+    ctx.beginPath();
+    ctx.moveTo(origin.x, Math.round(p.y) + 0.5);
+    ctx.lineTo(end.x, Math.round(p.y) + 0.5);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // Régua: escolhe um comprimento "redondo" em mm que caiba na tela.
+  const maxPx = Math.min(180, Math.max(80, canvasSize.w * 0.3));
+  const options = [1, 2, 5, 10, 20, 50, 100];
+  let barMm = options[0];
+  options.forEach((value) => {
+    if (value * pxPerMm * zoom <= maxPx) barMm = value;
+  });
+  const barPx = barMm * pxPerMm * zoom;
+  const margin = 14;
+  const x0 = margin;
+  const y0 = canvasSize.h - margin - 16;
+  const height = 8;
+  ctx.save();
+  ctx.fillStyle = "rgba(6,12,17,0.72)";
+  roundRect(ctx, x0 - 8, y0 - 22, barPx + 16, 46, 7);
+  ctx.fill();
+  const segments = Math.max(1, Math.round(barMm));
+  for (let index = 0; index < segments; index += 1) {
+    const start = x0 + (barPx * index) / segments;
+    const stop = x0 + (barPx * (index + 1)) / segments;
+    ctx.fillStyle = index % 2 === 0 ? "#f1f5f4" : "#0b1116";
+    ctx.fillRect(start, y0, Math.max(1, stop - start), height);
+  }
+  ctx.strokeStyle = "rgba(241,245,244,0.9)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x0, y0, barPx, height);
+  ctx.fillStyle = "#e6f4f1";
+  ctx.font = "700 10px 'JetBrains Mono', monospace";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillText("0", x0, y0 - 5);
+  ctx.textAlign = "right";
+  ctx.fillText(`${barMm} mm`, x0 + barPx, y0 - 5);
+  ctx.textAlign = "left";
+  ctx.fillStyle = "rgba(214,232,229,0.75)";
+  ctx.font = "600 9px Inter, system-ui, sans-serif";
+  ctx.fillText(`grade ${stepMm} mm`, x0, y0 + 21);
+  ctx.restore();
+}
+
 function drawPolygon(ctx, points, color, soft, label, live) {
   if (!points || points.length === 0) return;
   const screen = points.map(toScreen);
@@ -3104,8 +3202,9 @@ function drawPolygon(ctx, points, color, soft, label, live) {
 function drawGhostPolygon(ctx, points, meta) {
   if (!points || points.length < 3) return;
   const screen = points.map(toScreen);
+  const opacity = Math.max(0.05, Math.min(1, Number(state.ghost?.opacity) || 0.45));
   ctx.save();
-  ctx.globalAlpha = 0.45;
+  ctx.globalAlpha = meta.measured ? opacity * 0.6 : opacity;
   ctx.beginPath();
   screen.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
   ctx.closePath();
@@ -3133,7 +3232,7 @@ function drawGhostPolygon(ctx, points, meta) {
 
 function drawGhostRois(ctx) {
   ghostRois().forEach((roi) => {
-    drawGhostPolygon(ctx, roi.points, lesionMeta(roi.code));
+    drawGhostPolygon(ctx, roi.points, { ...lesionMeta(roi.code), measured: roi.measured });
   });
 }
 
@@ -3979,7 +4078,11 @@ function syncToolsFromSession() {
   state.landmarks = Array.isArray(session.landmarks)
     ? session.landmarks.map((point, index) => normalizeLandmark(point, index))
     : [];
-  state.roi = Array.isArray(session.healthy_skin_roi) ? [...session.healthy_skin_roi] : null;
+  state.roiManual = session.roi_mode === "manual";
+  state.roiWarnings = Array.isArray(session.roi_warnings) ? [...session.roi_warnings] : [];
+  state.roi = Array.isArray(session.healthy_skin_roi)
+    ? [...session.healthy_skin_roi]
+    : (!isBaseline(session) ? referenceHealthyRoi() : null);
   state.polygon = [];
   state.polygonActive = false;
   state.polygonAuto = false;
@@ -4478,13 +4581,26 @@ async function doCalibrate() {
    -------------------------------------------------------------------------- */
 function step3HTML(session) {
   const landmarksReady = state.landmarks.length === 4;
-  const roiReady = Array.isArray(state.roi) && state.roi[2] > 0 && state.roi[3] > 0;
   const alignedPreview = isAlignedPreview();
-  const shownRoi = alignedPreview ? referenceHealthyRoi() : state.roi;
-  const shownRoiReady = Array.isArray(shownRoi) && shownRoi[2] > 0 && shownRoi[3] > 0;
   const reference = !isBaseline(session);
   const processed = Boolean(session.aligned_image_url);
   const isT0 = isBaseline(session);
+  // Em T1..Tn a ROI é herdada de T0 e reprojetada automaticamente. Só é
+  // editável quando o ajuste manual é ativado explicitamente.
+  const inheritedRoi = !isT0 && !state.roiManual ? referenceHealthyRoi() : state.roi;
+  const roiReady = Array.isArray(inheritedRoi) && inheritedRoi[2] > 0 && inheritedRoi[3] > 0;
+  const roiLocked = !isT0 && !state.roiManual;
+  const alignedRoi = Array.isArray(session.healthy_skin_roi)
+    ? session.healthy_skin_roi
+    : referenceHealthyRoi();
+  const shownRoi = alignedPreview ? alignedRoi : inheritedRoi;
+  const shownRoiReady = Array.isArray(shownRoi) && shownRoi[2] > 0 && shownRoi[3] > 0;
+  const roiModeLabel = isT0
+    ? "referência"
+    : (state.roiManual ? "ajuste manual" : "reprojetada do T0");
+  const roiWarnings = Array.isArray(session.roi_warnings) && session.roi_warnings.length
+    ? session.roi_warnings
+    : (state.roiWarnings || []);
 
   const landmarkRows = [0, 1, 2, 3].map((index) => {
     const point = state.landmarks[index];
@@ -4511,14 +4627,18 @@ function step3HTML(session) {
     <div class="landmark-list">${landmarkRows}</div>
     <p class="form-hint">${isT0 ? "Clique no canvas e nomeie cada ponto. Os nomes serão reutilizados nas sessões seguintes." : "Marque os pontos na ordem dos nomes definidos em T0."} Clique num ponto marcado para removê-lo.</p>
 
-    <div class="section-title"><span>Pele saudável (ROI) ${helpBadge("help-glossary-roi", "ROI de pele saudável: retângulo de pele íntegra usado como referência de cor.")}</span><span>${shownRoiReady ? (alignedPreview ? "T0" : "definida") : "pendente"}</span></div>
+    <div class="section-title"><span>Pele saudável (ROI) ${helpBadge("help-glossary-roi", "ROI de pele saudável: retângulo de pele íntegra usado como referência de cor.")}</span><span>${shownRoiReady ? roiModeLabel : "pendente"}</span></div>
     <div class="roi-summary ${shownRoiReady ? "is-set" : ""}">
       <span>${shownRoiReady ? `x ${shownRoi[0]} · y ${shownRoi[1]} · ${shownRoi[2]}×${shownRoi[3]} px` : "Área de pele íntegra, sem lesões"}</span>
       <span class="form-actions">
-        <button type="button" class="btn btn-soft btn-sm ${state.roiDrawing ? "is-active" : ""}" data-action="draw-roi" ${alignedPreview ? "disabled" : ""}>${state.roiDrawing ? "Arraste na imagem…" : "Desenhar ROI"}</button>
-        ${roiReady ? `<button type="button" class="btn btn-ghost btn-sm" data-action="clear-roi" ${alignedPreview ? "disabled" : ""}>Limpar</button>` : ""}
+        <button type="button" class="btn btn-soft btn-sm ${state.roiDrawing ? "is-active" : ""}" data-action="draw-roi" ${(alignedPreview || roiLocked) ? "disabled" : ""}>${state.roiDrawing ? "Arraste na imagem…" : "Desenhar ROI"}</button>
+        ${roiReady && !roiLocked ? `<button type="button" class="btn btn-ghost btn-sm" data-action="clear-roi" ${alignedPreview ? "disabled" : ""}>Limpar</button>` : ""}
+        ${reference ? `<button type="button" class="btn btn-ghost btn-sm ${state.roiManual ? "is-active" : ""}" data-action="manual-roi" ${alignedPreview ? "disabled" : ""}>${state.roiManual ? "Voltar à ROI de T0" : "Ajuste manual…"}</button>` : ""}
       </span>
     </div>
+    ${roiLocked ? '<p class="form-hint">ROI herdada de T0 e reprojetada por homografia. Use “Ajuste manual…” somente em caso excepcional — a sessão ficará marcada no laudo.</p>' : ""}
+    ${state.roiManual ? '<p class="form-hint is-warning">Ajuste manual ativo: esta sessão não usará a reprojeção padrão de T0 e o laudo registrará a exceção.</p>' : ""}
+    ${roiWarnings.length ? `<div class="technical-alert">${roiWarnings.map((item) => `<span>${esc(item.message || item.code || item)}</span>`).join("")}</div>` : ""}
     ${alignedPreview ? '<p class="form-hint">Prévia no espaço de T0: exibindo pontos e ROI de T0. Volte a “Original” para editar os marcadores desta sessão.</p>' : ""}
 
     ${reference ? `
@@ -4628,8 +4748,15 @@ async function doRegister() {
     toast("Marque os 4 pontos anatômicos antes de processar.", "error");
     return;
   }
-  if (!state.roi) {
+  const isT0 = isBaseline(session);
+  const requiresRoi = isT0 || state.roiManual;
+  const payloadRoi = isT0 || state.roiManual ? state.roi : referenceHealthyRoi();
+  if (requiresRoi && !state.roi) {
     toast("Desenhe a ROI de pele saudável.", "error");
+    return;
+  }
+  if (!payloadRoi) {
+    toast("A sessão T0 precisa de uma ROI de pele saudável registrada.", "error");
     return;
   }
   if (!isBaseline(session)) {
@@ -4643,12 +4770,17 @@ async function doRegister() {
   try {
     const response = await postJSON(sessionEndpoint(session, "/register"), {
       landmarks: state.landmarks.map((p) => ({ label: p.label, x: p.x, y: p.y })),
-      healthy_skin_roi: state.roi.map((v) => Math.round(v)),
+      healthy_skin_roi: payloadRoi.map((v) => Math.round(v)),
+      roi_manual: !isT0 && state.roiManual,
     });
     state.sessions[session.id] = response.session;
+    state.roiWarnings = Array.isArray(response.roi?.warnings) ? response.roi.warnings : [];
     state.step3Preview = true;
     state.mode = "natural";
     toast(`Alinhamento de ${sessionCode(session)} concluído.`, "success");
+    response.roi?.warnings?.forEach((warning) => {
+      toast(warning.message || warning.code || "Aviso técnico da ROI.", "error", 7000);
+    });
     await refreshSessions();
     state.step3Preview = true;
     renderStepPanel();
@@ -4843,6 +4975,28 @@ function step4HTML(session) {
           <span>${esc(lesionLabel(session, item.code))} · ${measurementFor(session, item.code) ? "medida" : "não medida"}</span>
         </button>`).join("")}
     </div>
+
+    ${isAlignedSpace() ? `
+      <div class="section-title"><span>Guia de referência T0</span><span>L1–L4</span></div>
+      <div class="reference-guides">
+        <label class="check">
+          <input id="ghost-enabled" type="checkbox" ${state.ghost.enabled ? "checked" : ""} />
+          <span>Fantasma T0</span>
+        </label>
+        <label class="guide-opacity" for="ghost-opacity">
+          <span>Opacidade</span>
+          <input id="ghost-opacity" type="range" min="0.1" max="1" step="0.05" value="${state.ghost.opacity}" />
+          <output id="ghost-opacity-value">${Math.round(state.ghost.opacity * 100)}%</output>
+        </label>
+        <button type="button" class="btn btn-ghost btn-sm ${state.scaleGuide ? "is-active" : ""}" data-action="toggle-scale" aria-pressed="${state.scaleGuide}">
+          Régua mm
+        </button>
+      </div>` : (session.px_per_mm ? `
+      <div class="form-actions">
+        <button type="button" class="btn btn-ghost btn-sm ${state.scaleGuide ? "is-active" : ""}" data-action="toggle-scale" aria-pressed="${state.scaleGuide}">
+          Régua e grade em mm
+        </button>
+      </div>` : "")}
 
     <div class="section-title"><span>Descrição das regiões</span><span>editável</span></div>
     <div class="lesion-labels">${lesionInputs}</div>
@@ -5416,6 +5570,23 @@ function bindStepPanel() {
     });
   }
 
+  const ghostEnabled = $("ghost-enabled");
+  if (ghostEnabled) {
+    ghostEnabled.addEventListener("change", () => {
+      state.ghost.enabled = ghostEnabled.checked;
+      scheduleRedraw();
+    });
+  }
+  const ghostOpacity = $("ghost-opacity");
+  if (ghostOpacity) {
+    ghostOpacity.addEventListener("input", () => {
+      state.ghost.opacity = Math.max(0.1, Math.min(1, Number(ghostOpacity.value) || 0.45));
+      const output = $("ghost-opacity-value");
+      if (output) output.textContent = `${Math.round(state.ghost.opacity * 100)}%`;
+      scheduleRedraw();
+    });
+  }
+
   document.querySelectorAll("[data-field-threshold]").forEach((input) => {
     input.addEventListener("input", () => {
       const index = Number(input.dataset.fieldThreshold);
@@ -5465,7 +5636,28 @@ function handleAction(action, target) {
       renderStepPanel();
       scheduleRedraw();
       break;
-    case "draw-roi":
+    case "manual-roi": {
+      const session = activeSession();
+      if (!session || isBaseline(session)) break;
+      state.roiManual = !state.roiManual;
+      state.roiDrawing = false;
+      if (state.roiManual) {
+        state.roi = null;
+        toast("Ajuste manual excepcional ativado. Desenhe a ROI desta sessão.", "warning", 5200);
+      } else {
+        state.roi = referenceHealthyRoi();
+        toast("Reprojeção padrão de T0 restaurada.", "success", 3200);
+      }
+      renderStepPanel();
+      scheduleRedraw();
+      break;
+    }
+    case "draw-roi": {
+      const session = activeSession();
+      if (session && !isBaseline(session) && !state.roiManual) {
+        toast("A ROI é herdada de T0. Ative “Ajuste manual…” para editá-la.", "info", 4200);
+        break;
+      }
       if (isAlignedPreview()) {
         toast("Selecione “Original” para editar a ROI desta sessão.", "info", 3200);
         break;
@@ -5474,7 +5666,10 @@ function handleAction(action, target) {
       toast("Arraste sobre a pele íntegra de referência.", "info", 3200);
       renderStepPanel();
       break;
-    case "clear-roi":
+    }
+    case "clear-roi": {
+      const session = activeSession();
+      if (session && !isBaseline(session) && !state.roiManual) break;
       if (isAlignedPreview()) {
         toast("Selecione “Original” para editar a ROI desta sessão.", "info", 3200);
         break;
@@ -5484,6 +5679,7 @@ function handleAction(action, target) {
       renderStepPanel();
       scheduleRedraw();
       break;
+    }
     case "clear-landmarks":
       state.landmarks = [];
       hideLandmarkPopover();
@@ -5512,6 +5708,11 @@ function handleAction(action, target) {
       break;
     }
     case "goto-step4": setStep(4); break;
+    case "toggle-scale":
+      state.scaleGuide = !state.scaleGuide;
+      renderStepPanel();
+      scheduleRedraw();
+      break;
     case "measure-stria": measureStria(); break;
     case "auto-segment": {
       const session = activeSession();
@@ -5757,6 +5958,7 @@ function updateBA() {
   if (left) left.textContent = anon ? "Antes" : `T0 · ${formatDate(t0?.captured_at) || "baseline"}`;
   if (right) right.textContent = anon ? "Depois" : `${sessionCode(other)} · ${formatDate(other?.captured_at) || "seguimento"}`;
   applyComparePosition();
+  applyCompareZoom();
 }
 
 function applyComparePosition() {
@@ -5771,12 +5973,61 @@ function applyComparePosition() {
 function setComparePosition(clientX) {
   const stage = $("ba-stage");
   if (!stage) return;
+  // getBoundingClientRect já reflete o zoom aplicado ao palco, então a
+  // cortina continua precisa mesmo durante o arraste ampliado.
   const rect = stage.getBoundingClientRect();
   if (!rect.width) return;
   let pct = ((clientX - rect.left) / rect.width) * 100;
   pct = Math.max(2, Math.min(98, pct));
   state.compare.pos = pct;
   applyComparePosition();
+}
+
+function applyCompareZoom() {
+  const stage = $("ba-stage");
+  if (!stage) return;
+  const zoom = Math.max(1, Math.min(5, Number(state.compare.zoom) || 1));
+  state.compare.zoom = zoom;
+  const viewport = $("ba-viewport");
+  if (viewport) {
+    const width = viewport.clientWidth;
+    const height = viewport.clientHeight;
+    const minX = width - width * zoom;
+    const minY = height - height * zoom;
+    state.compare.panX = Math.max(minX, Math.min(0, Number(state.compare.panX) || 0));
+    state.compare.panY = Math.max(minY, Math.min(0, Number(state.compare.panY) || 0));
+  }
+  stage.style.transform = `translate(${state.compare.panX}px, ${state.compare.panY}px) scale(${zoom})`;
+  const label = $("ba-zoom-level");
+  if (label) label.textContent = `${Math.round(zoom * 100)}%`;
+}
+
+function setCompareZoom(target, clientX, clientY) {
+  const viewport = $("ba-viewport");
+  if (!viewport) return;
+  const oldZoom = Math.max(1, Math.min(5, Number(state.compare.zoom) || 1));
+  const newZoom = Math.max(1, Math.min(5, Number(target) || oldZoom));
+  if (Math.abs(newZoom - oldZoom) < 1e-4) return;
+  const rect = viewport.getBoundingClientRect();
+  const pointX = (clientX ?? rect.left + rect.width / 2) - rect.left;
+  const pointY = (clientY ?? rect.top + rect.height / 2) - rect.top;
+  const ratio = newZoom / oldZoom;
+  state.compare.panX = pointX - (pointX - state.compare.panX) * ratio;
+  state.compare.panY = pointY - (pointY - state.compare.panY) * ratio;
+  state.compare.zoom = newZoom;
+  applyCompareZoom();
+}
+
+function zoomCompare(factor, clientX, clientY) {
+  const current = Number(state.compare.zoom) || 1;
+  setCompareZoom(current * factor, clientX, clientY);
+}
+
+function resetCompareZoom() {
+  state.compare.zoom = 1;
+  state.compare.panX = 0;
+  state.compare.panY = 0;
+  applyCompareZoom();
 }
 
 async function setGais(sessionId, value) {
@@ -7234,21 +7485,106 @@ function bindEvents() {
   });
 
   const stage = $("ba-stage");
+  const viewport = $("ba-viewport");
   let baDragging = false;
+  let baPanning = false;
+  let baPanStart = null;
+  let baPinch = null;
+  const comparePointers = new Map();
+
+  const compareReady = () => Boolean(compareImageUrls(state.compare.sessionId).top);
+  const viewportPoint = (event) => {
+    const rect = viewport?.getBoundingClientRect();
+    if (!rect) return { x: event.clientX, y: event.clientY };
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  };
+
   stage?.addEventListener("pointerdown", (event) => {
-    if (!compareImageUrls(state.compare.sessionId).top) return;
-    baDragging = true;
+    if (!compareReady()) return;
+    comparePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
     stage.setPointerCapture?.(event.pointerId);
+    if (comparePointers.size === 2) {
+      // Pinça: congela a cortina e passa a controlar zoom/pan.
+      baDragging = false;
+      baPanning = false;
+      const [first, second] = [...comparePointers.values()];
+      baPinch = {
+        distance: Math.max(1, Math.hypot(first.x - second.x, first.y - second.y)),
+        zoom: Number(state.compare.zoom) || 1,
+      };
+      return;
+    }
+    if (event.button === 1 || event.shiftKey) {
+      baPanning = true;
+      baPanStart = {
+        x: event.clientX - (Number(state.compare.panX) || 0),
+        y: event.clientY - (Number(state.compare.panY) || 0),
+      };
+      stage.style.cursor = "grabbing";
+      return;
+    }
+    baDragging = true;
     setComparePosition(event.clientX);
   });
+
   stage?.addEventListener("pointermove", (event) => {
+    if (comparePointers.has(event.pointerId)) {
+      comparePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    }
+    if (baPinch && comparePointers.size >= 2) {
+      const [first, second] = [...comparePointers.values()];
+      const distance = Math.max(1, Math.hypot(first.x - second.x, first.y - second.y));
+      const point = viewportPoint(event);
+      const rect = viewport?.getBoundingClientRect();
+      setCompareZoom(
+        baPinch.zoom * (distance / baPinch.distance),
+        (rect?.left || 0) + point.x,
+        (rect?.top || 0) + point.y,
+      );
+      return;
+    }
+    if (baPanning && baPanStart) {
+      state.compare.panX = event.clientX - baPanStart.x;
+      state.compare.panY = event.clientY - baPanStart.y;
+      applyCompareZoom();
+      return;
+    }
     if (baDragging) setComparePosition(event.clientX);
   });
-  stage?.addEventListener("pointerup", (event) => {
-    baDragging = false;
-    stage.releasePointerCapture?.(event.pointerId);
+
+  const endComparePointer = (event) => {
+    comparePointers.delete(event.pointerId);
+    if (comparePointers.size < 2) baPinch = null;
+    if (comparePointers.size === 0) {
+      baDragging = false;
+      baPanning = false;
+      baPanStart = null;
+      if (stage) stage.style.cursor = "";
+    }
+    stage?.releasePointerCapture?.(event.pointerId);
+  };
+  stage?.addEventListener("pointerup", endComparePointer);
+  stage?.addEventListener("pointercancel", endComparePointer);
+  stage?.addEventListener("pointerleave", (event) => {
+    if (baDragging && event.buttons === 0) endComparePointer(event);
   });
-  stage?.addEventListener("pointercancel", () => { baDragging = false; });
+
+  viewport?.addEventListener("wheel", (event) => {
+    if (!compareReady()) return;
+    event.preventDefault();
+    const factor = Math.exp(-event.deltaY * 0.0015);
+    zoomCompare(factor, event.clientX, event.clientY);
+  }, { passive: false });
+
+  $("ba-zoom-in")?.addEventListener("click", () => {
+    const box = viewport?.getBoundingClientRect();
+    zoomCompare(1.25, box ? box.left + box.width / 2 : undefined, box ? box.top + box.height / 2 : undefined);
+  });
+  $("ba-zoom-out")?.addEventListener("click", () => {
+    const box = viewport?.getBoundingClientRect();
+    zoomCompare(0.8, box ? box.left + box.width / 2 : undefined, box ? box.top + box.height / 2 : undefined);
+  });
+  $("ba-zoom-reset")?.addEventListener("click", resetCompareZoom);
 
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !$("compare-modal")?.hidden) closeCompare();

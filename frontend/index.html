@@ -1171,19 +1171,27 @@
             </label>
           </div>
 
-          <div id="ba-stage" class="ba-stage">
-            <img id="ba-base" alt="Imagem antes" draggable="false" />
-            <img id="ba-top" alt="Imagem depois" draggable="false" />
-            <div id="ba-empty" class="ba-empty" hidden></div>
-            <div id="ba-divider" class="ba-divider" aria-hidden="true">
-              <span class="ba-handle">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18-6-6 6-6" /><path d="m15 6 6 6-6 6" /></svg>
-              </span>
+          <div id="ba-viewport" class="ba-viewport">
+            <div id="ba-stage" class="ba-stage">
+              <img id="ba-base" alt="Imagem antes" draggable="false" />
+              <img id="ba-top" alt="Imagem depois" draggable="false" />
+              <div id="ba-empty" class="ba-empty" hidden></div>
+              <div id="ba-divider" class="ba-divider" aria-hidden="true">
+                <span class="ba-handle">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18-6-6 6-6" /><path d="m15 6 6 6-6 6" /></svg>
+                </span>
+              </div>
+              <span id="ba-label-left" class="ba-label ba-label-left">T0</span>
+              <span id="ba-label-right" class="ba-label ba-label-right">T2</span>
             </div>
-            <span id="ba-label-left" class="ba-label ba-label-left">T0</span>
-            <span id="ba-label-right" class="ba-label ba-label-right">T2</span>
           </div>
-          <p class="compare-note">Arraste a cortina vertical ou clique na imagem para revelar antes e depois. As imagens já estão alinhadas ao pixel.</p>
+          <div class="compare-zoom" role="group" aria-label="Zoom do comparador">
+            <button id="ba-zoom-out" class="icon-btn" type="button" title="Reduzir zoom" aria-label="Reduzir zoom do comparador">−</button>
+            <span id="ba-zoom-level" class="zoom-level">100%</span>
+            <button id="ba-zoom-in" class="icon-btn" type="button" title="Aumentar zoom" aria-label="Aumentar zoom do comparador">+</button>
+            <button id="ba-zoom-reset" class="btn btn-ghost btn-sm" type="button" title="Resetar zoom e enquadramento">Resetar</button>
+          </div>
+          <p class="compare-note">Arraste a cortina vertical ou clique na imagem para revelar antes e depois. Roda do mouse amplia, pinça (dois dedos) ou Shift+arraste move a imagem; use os botões para resetar.</p>
 
           <div class="gais-blind">
             <div class="gais-copy">

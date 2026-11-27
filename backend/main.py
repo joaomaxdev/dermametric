@@ -790,15 +790,22 @@ def register(session_id: str, payload: RegisterRequest) -> dict[str, Any]:
     enhanced_path = db.WORK_DIR / f"{uuid4().hex}_enhanced.png"
     is_reference_session = _session_code(row) == "T0"
     reference_roi = payload.healthy_skin_roi
+    roi_mode = "reference" if is_reference_session else "reprojected_t0"
+    roi_warnings: list[dict[str, Any]] = []
+    reprojected_source: list[int] | None = None
 
     try:
         with _materialized(row["clean_image_path"]) as clean_path:
             if is_reference_session:
                 reference_image = _vision_call(vision.read_image_bgr, clean_path)
                 output_shape = reference_image.shape[:2]
+                source_shape = output_shape
                 ref_coords = coords
                 ref_lab_means = None
+                normalization_roi = list(payload.healthy_skin_roi)
             else:
+                source_image = _vision_call(vision.read_image_bgr, clean_path)
+                source_shape = source_image.shape[:2]
                 t0_row = _require_session(_reference_t0_id(row))
                 t0_session = db.get_session(t0_row["id"])
                 assert t0_session is not None
@@ -823,6 +830,13 @@ def register(session_id: str, payload: RegisterRequest) -> dict[str, Any]:
                         vision.compute_region_lab_means, str(t0_path), t0_roi
                     )
 
+                # Por padrão a ROI é herdada de T0 e reprojetada para o espaço
+                # alinhado desta sessão. O ajuste manual é exceção explícita.
+                if payload.roi_manual:
+                    roi_mode = "manual"
+                else:
+                    normalization_roi = list(reference_roi)
+
             _, homography = _vision_call(
                 vision.align_to_reference,
                 str(clean_path),
@@ -834,19 +848,59 @@ def register(session_id: str, payload: RegisterRequest) -> dict[str, Any]:
                 return_homography=True,
             )
 
-            # A ROI é marcada nas coordenadas da sessão atual; para medir a
-            # pele saudável na imagem já alinhada, ela precisa ser projetada
-            # pela homografia. Se a projeção sair da imagem, usa-se a ROI de
-            # referência de T0 (que já está nesse espaço).
-            normalization_roi = list(payload.healthy_skin_roi)
-            if homography is not None:
-                projected_roi = _vision_call(
-                    vision.project_roi, payload.healthy_skin_roi, homography, output_shape
+            if not is_reference_session and not payload.roi_manual:
+                # Confirma que a ROI canônica de T0, levada pela homografia
+                # inversa, ainda cai dentro da foto atual (visibilidade).
+                reprojected_source = _vision_call(
+                    vision.project_roi_inverse,
+                    reference_roi,
+                    homography,
+                    source_shape,
                 )
-                if projected_roi is not None:
-                    normalization_roi = projected_roi
-                else:
-                    normalization_roi = list(reference_roi)
+                if reprojected_source is None:
+                    roi_warnings.append(
+                        {
+                            "code": "roi_source_out_of_frame",
+                            "message": (
+                                "A ROI de T0 reprojetada pela homografia sai da "
+                                "foto desta sessão; revise os marcos anatômicos."
+                            ),
+                        }
+                    )
+
+            if not is_reference_session and payload.roi_manual:
+                projected_roi = _vision_call(
+                    vision.project_roi,
+                    payload.healthy_skin_roi,
+                    homography,
+                    output_shape,
+                )
+                if projected_roi is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "ROI manual fora da área válida após o alinhamento. "
+                            "Redesenhe a ROI dentro da pele visível ou volte à "
+                            "ROI reprojetada de T0."
+                        ),
+                    )
+                normalization_roi = projected_roi
+                roi_warnings.append(
+                    {
+                        "code": "roi_manual_override",
+                        "message": (
+                            "Sessão usa ajuste manual excepcional da ROI; a "
+                            "reprojeção padrão de T0 não foi aplicada."
+                        ),
+                    }
+                )
+
+            # Mede a qualidade da ROI na imagem já alinhada: área inválida
+            # (borda preta da homografia) e alta variância interna de cor.
+            roi_stats = _vision_call(
+                vision.analyze_region_lab, str(raw_path), normalization_roi
+            )
+            roi_warnings.extend(roi_stats.get("warnings") or [])
 
             _, measured_means = _vision_call(
                 vision.normalize_and_enhance_cielab,
@@ -870,9 +924,11 @@ def register(session_id: str, payload: RegisterRequest) -> dict[str, Any]:
             session = db.update_session(
                 session_id,
                 landmarks_json=landmarks,
-                healthy_skin_roi_json=payload.healthy_skin_roi,
+                healthy_skin_roi_json=normalization_roi,
                 aligned_image_path=db.storage_relative(aligned_enc),
                 enhanced_image_path=db.storage_relative(enhanced_enc),
+                roi_mode=roi_mode,
+                roi_warnings_json=roi_warnings,
             )
     finally:
         for temporary in (raw_path, aligned_path, enhanced_path):
@@ -887,6 +943,15 @@ def register(session_id: str, payload: RegisterRequest) -> dict[str, Any]:
             "input": list(payload.healthy_skin_roi),
             "normalization": normalization_roi,
             "reference": list(reference_roi),
+            "reprojected_source": reprojected_source,
+            "mode": roi_mode,
+            "manual": bool(payload.roi_manual and not is_reference_session),
+            "warnings": roi_warnings,
+            "stats": {
+                "median_lab": roi_stats.get("median_lab"),
+                "std_lab": roi_stats.get("std_lab"),
+                "valid_fraction": roi_stats.get("valid_fraction"),
+            },
         },
         "session": session,
     }
@@ -912,6 +977,12 @@ def auto_segment(
             payload.sensitivity,
             payload.mode,
         )
+        if result.get("polygon"):
+            cleaned, geometry = _vision_call(
+                vision.sanitize_polygon, result["polygon"]
+            )
+            result["polygon"] = cleaned
+            result["technical_warnings"] = geometry.get("warnings") or []
     return {"session_id": session_id, **result}
 
 
@@ -956,19 +1027,27 @@ def measure(session_id: str, payload: MeasureRequest) -> dict[str, Any]:
         )
 
     with _materialized(row["aligned_image_path"]) as aligned_path:
+        image = _vision_call(vision.read_image_bgr, str(aligned_path))
+        cleaned_polygon, geometry = _vision_call(
+            vision.sanitize_polygon,
+            payload.polygon,
+            image.shape[:2],
+        )
         metrics = _vision_call(
             vision.measure_stria_polygon,
             str(aligned_path),
-            payload.polygon,
+            cleaned_polygon,
             float(row["px_per_mm"]),
         )
+    warnings = geometry.get("warnings") or []
+    metrics["technical_warnings"] = warnings
 
     session = db.get_session(session_id)
     labels = (session or {}).get("lesion_labels") or {}
     label = (payload.stria_label or labels.get(payload.stria_code) or "").strip() or None
 
     saved = db.upsert_measurement(
-        session_id, payload.stria_code, payload.polygon, metrics, label
+        session_id, payload.stria_code, cleaned_polygon, metrics, label
     )
     return {
         "session_id": session_id,
@@ -977,6 +1056,8 @@ def measure(session_id: str, payload: MeasureRequest) -> dict[str, Any]:
         "measurement_id": saved["id"],
         "created_at": saved["created_at"],
         **metrics,
+        "polygon": cleaned_polygon,
+        "technical_warnings": warnings,
         "measurement": saved,
     }
 

@@ -96,6 +96,13 @@ class RegisterRequest(BaseModel):
         max_length=4,
         description="[x, y, w, h] da pele íntegra de referência",
     )
+    roi_manual: bool = Field(
+        default=False,
+        description=(
+            "Ajuste excepcional: usa a ROI desenhada nesta sessão em vez da "
+            "ROI de T0 reprojetada por homografia. Registrado no laudo."
+        ),
+    )
 
     @field_validator("landmarks")
     @classmethod

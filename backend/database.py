@@ -93,6 +93,8 @@ _SESSION_SCHEMA = """CREATE TABLE IF NOT EXISTS sessions (
     clean_image_path TEXT,
     lesion_labels_json TEXT,
     clinical_scales_json TEXT,
+    roi_mode TEXT,
+    roi_warnings_json TEXT,
     updated_at TEXT NOT NULL
 );"""
 
@@ -236,6 +238,8 @@ def init_db() -> None:
         _ensure_column(conn, "patients", "birth_date", "TEXT")
         _ensure_column(conn, "patients", "phone", "TEXT")
         _ensure_column(conn, "striae_measurements", "delta_e_00", "REAL")
+        _ensure_column(conn, "sessions", "roi_mode", "TEXT")
+        _ensure_column(conn, "sessions", "roi_warnings_json", "TEXT")
         conn.execute(
             "UPDATE sessions SET session_code = id"
             " WHERE session_code IS NULL OR session_code = ''"
@@ -367,6 +371,7 @@ def _serialize_session(row: dict[str, Any]) -> dict[str, Any]:
     clinical_scales = _json_or_none(_decrypt_text(session.get("clinical_scales_json")))
     ruler_points = _json_or_none(_decrypt_text(session.get("ruler_points_json")))
     roi = _json_or_none(_decrypt_text(session.get("healthy_skin_roi_json")))
+    roi_warnings = _json_or_none(_decrypt_text(session.get("roi_warnings_json"))) or []
 
     session["code"] = session.get("session_code") or session_id
     session["patient_id"] = session.get("patient_id")
@@ -376,6 +381,8 @@ def _serialize_session(row: dict[str, Any]) -> dict[str, Any]:
     session["clinical_scales"] = clinical_scales
     session["ruler_points"] = ruler_points
     session["healthy_skin_roi"] = roi
+    session["roi_mode"] = session.get("roi_mode") or ("reference" if session_id == "T0" else None)
+    session["roi_warnings"] = roi_warnings if isinstance(roi_warnings, list) else []
 
     clean_path = session.get("clean_image_path")
     ruler_path = session.get("ruler_image_path")
@@ -426,6 +433,7 @@ def db_load_measurements(session_id: str) -> list[dict[str, Any]]:
                     "stria_label": m.get("stria_label"),
                     "polygon": polygon if polygon is not None else [],
                     "metrics": metrics,
+                    "technical_warnings": metrics.get("technical_warnings") or [],
                     "measurement": {
                         "id": m.get("id"),
                         "session_id": m.get("session_id"),
@@ -438,6 +446,7 @@ def db_load_measurements(session_id: str) -> list[dict[str, Any]]:
                         "mean_width_mm": metrics.get("mean_width_mm"),
                         "max_width_mm": metrics.get("max_width_mm"),
                         "length_mm": metrics.get("length_mm"),
+                        "technical_warnings": metrics.get("technical_warnings") or [],
                         "created_at": m.get("created_at"),
                     },
                     "delta_e_00": metrics.get("delta_e_00") if metrics.get("delta_e_00") is not None else metrics.get("delta_e"),
@@ -560,9 +569,10 @@ def _json_or_none(value: Any) -> Any:
 def update_session(session_id: str, **updates) -> dict[str, Any] | None:
     allowed = {"label", "captured_at", "px_per_mm", "ruler_points_json", "landmarks_json",
                "healthy_skin_roi_json", "aligned_image_path", "enhanced_image_path",
-               "ruler_image_path", "clean_image_path", "lesion_labels_json", "clinical_scales_json"}
+               "ruler_image_path", "clean_image_path", "lesion_labels_json", "clinical_scales_json",
+               "roi_mode", "roi_warnings_json"}
     encrypted_json_fields = {"ruler_points_json", "landmarks_json", "healthy_skin_roi_json",
-                             "lesion_labels_json", "clinical_scales_json"}
+                             "lesion_labels_json", "clinical_scales_json", "roi_warnings_json"}
     with connection() as conn:
         sets = []
         args = []

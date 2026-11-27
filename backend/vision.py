@@ -571,6 +571,27 @@ def project_roi(
 # ---------------------------------------------------------------------------
 # 3. Normalização de exposição + realce CLAHE
 # ---------------------------------------------------------------------------
+def project_roi_inverse(
+    roi: Iterable[int],
+    homography: np.ndarray,
+    source_shape: tuple[int, int],
+) -> list[int] | None:
+    """Projeta uma ROI do espaço alinhado de T0 de volta para a foto de origem.
+
+    Usado para confirmar que a ROI herdada de T0 ainda cai dentro da foto
+    atual depois da homografia. A ROI canônica continua sendo a de T0; esta
+    projeção é apenas uma validação de visibilidade/área válida.
+    """
+    matrix = np.asarray(homography, dtype=np.float64)
+    if matrix.shape != (3, 3):
+        raise ValueError("homografia deve ser uma matriz 3x3")
+    try:
+        inverse = np.linalg.inv(matrix)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError("homografia singular: não é possível reprojetar a ROI") from exc
+    return project_roi(roi, inverse, source_shape)
+
+
 def _validate_roi(roi: Iterable[int], width: int, height: int) -> tuple[int, int, int, int]:
     x, y, w, h = (int(v) for v in roi)
     if w <= 0 or h <= 0:
@@ -582,16 +603,109 @@ def _validate_roi(roi: Iterable[int], width: int, height: int) -> tuple[int, int
     return x0, y0, x1 - x0, y1 - y0
 
 
-def compute_region_lab_means(
-    img_path: str, roi: list[int]
-) -> tuple[float, float, float]:
-    """Média CIELAB real ``(L*, a*, b*)`` de uma ROI ``[x, y, w, h]``."""
+# Limiares de qualidade da ROI de pele sadia. Valores empíricos: abaixo de
+# 80% de pixels válidos a caixa invade a borda preta da imagem alinhada; desvios
+# acima de ~16 (L*) ou ~14 (croma combinado) indicam que a caixa caiu sobre
+# lesão, pelo, sombra ou outra região não homogênea.
+ROI_INVALID_LUMA = 10.0
+ROI_MIN_VALID_FRACTION = 0.80
+ROI_MAX_LIGHTNESS_STD = 16.0
+ROI_MAX_CHROMA_STD = 14.0
+
+
+def _roi_warnings(
+    valid_fraction: float,
+    lightness_std: float,
+    chroma_std: float,
+) -> list[dict[str, str]]:
+    warnings: list[dict[str, str]] = []
+    if valid_fraction < ROI_MIN_VALID_FRACTION:
+        warnings.append(
+            {
+                "code": "roi_outside_valid_area",
+                "message": (
+                    "ROI de pele sadia invade a área inválida da imagem "
+                    f"({valid_fraction * 100:.0f}% de pixels válidos; mínimo "
+                    f"{ROI_MIN_VALID_FRACTION * 100:.0f}%)."
+                ),
+            }
+        )
+    if (
+        lightness_std > ROI_MAX_LIGHTNESS_STD
+        or chroma_std > ROI_MAX_CHROMA_STD
+    ):
+        warnings.append(
+            {
+                "code": "roi_high_variance",
+                "message": (
+                    "ROI de pele sadia com alta variância interna "
+                    f"(σL*={lightness_std:.1f}; σcroma={chroma_std:.1f}). "
+                    "Revise se a caixa cobre apenas pele íntegra."
+                ),
+            }
+        )
+    return warnings
+
+
+def analyze_region_lab(img_path: str, roi: list[int]) -> dict[str, object]:
+    """Estatística robusta da ROI ``[x, y, w, h]`` em CIELAB.
+
+    A mediana é usada como descritor central para não deixar que poucos
+    pixels de lesão/pelo/sombra desloquem a referência de cor. Também
+    devolve dispersão (desvio-padrão), fração de pixels válidos (fora da
+    borda preta da imagem alinhada) e avisos técnicos prontos para a UI e
+    para o laudo.
+    """
     image = read_image_bgr(img_path)
     height, width = image.shape[:2]
     x, y, w, h = _validate_roi(roi, width, height)
-    lab = bgr_to_cielab_float(image)
-    means = lab[y : y + h, x : x + w].reshape(-1, 3).mean(axis=0)
-    return tuple(float(v) for v in means)  # type: ignore[return-value]
+    region = image[y : y + h, x : x + w]
+    if region.size == 0:
+        raise ValueError("healthy_skin_roi fora dos limites da imagem")
+
+    # A área inválida típica é a borda preta criada pela homografia. Pixels
+    # escuros também aparecem em sombras profundas, por isso o limiar é baixo.
+    valid = region.max(axis=2) > ROI_INVALID_LUMA
+    valid_fraction = float(valid.mean()) if valid.size else 0.0
+    if not valid.any():
+        valid = np.ones(region.shape[:2], dtype=bool)
+
+    lab_region = bgr_to_cielab_float(region)
+    pixels = lab_region[valid]
+    if pixels.size == 0:
+        raise ValueError("ROI de pele sadia sem pixels válidos")
+
+    median = np.median(pixels, axis=0)
+    mean = pixels.mean(axis=0)
+    std = pixels.std(axis=0)
+    lightness_std = float(std[0])
+    chroma_std = float(np.hypot(std[1], std[2]))
+    warnings = _roi_warnings(valid_fraction, lightness_std, chroma_std)
+
+    return {
+        "median_lab": [float(value) for value in median],
+        "mean_lab": [float(value) for value in mean],
+        "std_lab": [float(value) for value in std],
+        "lightness_std": lightness_std,
+        "chroma_std": chroma_std,
+        "valid_fraction": valid_fraction,
+        "warnings": warnings,
+    }
+
+
+def compute_region_lab_means(
+    img_path: str, roi: list[int]
+) -> tuple[float, float, float]:
+    """Mediana CIELAB ``(L*, a*, b*)`` de uma ROI ``[x, y, w, h]``.
+
+    A mediana é deliberadamente usada no lugar da média: é o estimador
+    robusto que permanece estável quando a ROI contém alguns pixels de
+    lesão, pelo ou reflexo especular.
+    """
+    stats = analyze_region_lab(img_path, roi)
+    median = stats["median_lab"]
+    assert isinstance(median, list)
+    return float(median[0]), float(median[1]), float(median[2])
 
 
 # Limites de correção fotométrica entre sessões. Evitam que uma diferença
@@ -680,7 +794,9 @@ def normalize_and_enhance_cielab(
 
     lab = bgr_to_cielab_float(image)
     roi_lab = lab[y : y + h, x : x + w].reshape(-1, 3)
-    current_means = tuple(float(v) for v in roi_lab.mean(axis=0))
+    # Mediana robusta: pixels isolados de lesão/pelo/sombra não deslocam a
+    # referência fotométrica usada no alinhamento entre sessões.
+    current_means = tuple(float(v) for v in np.median(roi_lab, axis=0))
 
     normalized_lab = lab
     if ref_lab_means is not None:
@@ -736,12 +852,255 @@ def normalize_and_enhance_cielab(
 # ---------------------------------------------------------------------------
 # 4. Morfometria + contraste CIEDE2000
 # ---------------------------------------------------------------------------
+POLYGON_DUPLICATE_EPS = 1e-6
+# Tolerância sub-pixel: remove vértices realmente redundantes sem "podar"
+# curvas suaves (elipses muito alongadas têm flecha local ~0.002 px).
+POLYGON_COLLINEAR_EPS = 1e-3
+POLYGON_MIN_AREA_PX = 1e-6
+MAX_PLAUSIBLE_LENGTH_MM = 400.0
+MIN_PLAUSIBLE_LENGTH_MM = 0.2
+
+
+def _signed_polygon_area(points: np.ndarray) -> float:
+    x = points[:, 0]
+    y = points[:, 1]
+    return float(0.5 * np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y))
+
+
+def _segments_intersect(
+    a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray
+) -> bool:
+    def orient(p: np.ndarray, q: np.ndarray, r: np.ndarray) -> float:
+        return float((q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]))
+
+    def on_segment(p: np.ndarray, q: np.ndarray, r: np.ndarray) -> bool:
+        return (
+            min(p[0], r[0]) - 1e-9 <= q[0] <= max(p[0], r[0]) + 1e-9
+            and min(p[1], r[1]) - 1e-9 <= q[1] <= max(p[1], r[1]) + 1e-9
+        )
+
+    o1 = orient(a, b, c)
+    o2 = orient(a, b, d)
+    o3 = orient(c, d, a)
+    o4 = orient(c, d, b)
+    if (o1 > 0) != (o2 > 0) and (o3 > 0) != (o4 > 0):
+        return True
+    if abs(o1) <= 1e-9 and on_segment(a, c, b):
+        return True
+    if abs(o2) <= 1e-9 and on_segment(a, d, b):
+        return True
+    if abs(o3) <= 1e-9 and on_segment(c, a, d):
+        return True
+    if abs(o4) <= 1e-9 and on_segment(c, b, d):
+        return True
+    return False
+
+
+def polygon_self_intersects(points: Iterable[Iterable[float]]) -> bool:
+    """Verdadeiro quando duas arestas não adjacentes do polígono se cruzam."""
+    array = np.asarray(points, dtype=np.float64)
+    if array.ndim != 2 or array.shape[1] != 2 or len(array) < 4:
+        return False
+    count = len(array)
+    for i in range(count):
+        a = array[i]
+        b = array[(i + 1) % count]
+        for j in range(i + 1, count):
+            if j == i or j == (i + 1) % count or i == (j + 1) % count:
+                continue
+            if _segments_intersect(a, b, array[j], array[(j + 1) % count]):
+                return True
+    return False
+
+
+def _drop_redundant_vertices(points: np.ndarray) -> tuple[np.ndarray, int, int]:
+    """Remove duplicados consecutivos e vértices colineares/sobrepostos."""
+    cleaned: list[np.ndarray] = []
+    duplicates = 0
+    for point in points:
+        if cleaned and np.linalg.norm(point - cleaned[-1]) <= POLYGON_DUPLICATE_EPS:
+            duplicates += 1
+            continue
+        cleaned.append(point)
+    if len(cleaned) > 1 and np.linalg.norm(cleaned[0] - cleaned[-1]) <= POLYGON_DUPLICATE_EPS:
+        cleaned.pop()
+        duplicates += 1
+
+    removed = 0
+    changed = True
+    while changed and len(cleaned) >= 3:
+        changed = False
+        kept: list[np.ndarray] = []
+        count = len(cleaned)
+        for index, current in enumerate(cleaned):
+            previous = cleaned[index - 1]
+            following = cleaned[(index + 1) % count]
+            base = following - previous
+            base_length = float(np.linalg.norm(base))
+            if base_length <= POLYGON_DUPLICATE_EPS:
+                removed += 1
+                changed = True
+                continue
+            cross = abs(
+                float((current[0] - previous[0]) * base[1]
+                      - (current[1] - previous[1]) * base[0])
+            )
+            distance = cross / base_length
+            # Só remove quando o vértice está entre os vizinhos; assim uma
+            # ponta afiada (fora do segmento) é preservada.
+            between = float(np.dot(current - previous, current - following)) <= 0.0
+            if distance <= POLYGON_COLLINEAR_EPS and between:
+                removed += 1
+                changed = True
+                continue
+            kept.append(current)
+        if kept and len(kept) != count:
+            cleaned = kept
+    return np.asarray(cleaned, dtype=np.float64), duplicates, removed
+
+
+def _repair_self_intersections(points: np.ndarray) -> np.ndarray:
+    """Substitui o polígono autointersectado pelo contorno externo preenchido."""
+    x0, y0 = np.floor(points.min(axis=0)) - 2
+    x1, y1 = np.ceil(points.max(axis=0)) + 2
+    width = max(4, int(x1 - x0 + 1))
+    height = max(4, int(y1 - y0 + 1))
+    local = points - np.array([x0, y0])
+    mask = np.zeros((height, width), dtype=np.uint8)
+    cv2.fillPoly(mask, [np.rint(local).astype(np.int32)], 255)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        raise ValueError("Polígono autointersectado não pôde ser corrigido")
+    contour = max(contours, key=cv2.contourArea)
+    if len(contour) < 3 or cv2.contourArea(contour) <= 0:
+        raise ValueError("Polígono autointersectado não pôde ser corrigido")
+    epsilon = max(0.5, 0.002 * cv2.arcLength(contour, True))
+    simplified = cv2.approxPolyDP(contour, epsilon, True).reshape(-1, 2)
+    if len(simplified) < 3:
+        simplified = contour.reshape(-1, 2)
+    repaired = simplified.astype(np.float64) + np.array([x0, y0])
+    if polygon_self_intersects(repaired):
+        # Contornos que apenas se tocam (ex.: "gravata-borboleta") ainda
+        # repetem o ponto de cruzamento. O fecho convexo garante um polígono
+        # simples; é uma correção conservadora e rastreável no laudo.
+        hull = cv2.convexHull(points.astype(np.float32)).reshape(-1, 2)
+        hull_epsilon = max(0.5, 0.002 * cv2.arcLength(hull.astype(np.float32), True))
+        hull_simplified = cv2.approxPolyDP(
+            hull.astype(np.float32), hull_epsilon, True
+        ).reshape(-1, 2)
+        if len(hull_simplified) >= 3:
+            repaired = hull_simplified.astype(np.float64)
+    return repaired
+
+
+def sanitize_polygon(
+    polygon_pts: Iterable[Iterable[float]],
+    image_shape: tuple[int, int] | None = None,
+) -> tuple[list[list[float]], dict[str, object]]:
+    """Sanitiza o polígono antes da morfometria.
+
+    Corrige, nesta ordem: coordenadas não finitas/fora da imagem, vértices
+    duplicados, vértices redundantes (colineares), autointerseções e
+    orientação. Devolve ``(pontos, info)`` onde ``info`` contém a lista de
+    ``warnings`` técnicos para persistência/laudo.
+
+    A função é idempotente para polígonos já válidos: as coordenadas
+    originais são preservadas, evitando alterar medições aprovadas.
+    """
+    raw = list(polygon_pts)
+    if len(raw) < 3:
+        raise ValueError("Polígono inválido: mínimo de 3 vértices [x, y]")
+    points: list[list[float]] = []
+    for index, point in enumerate(raw):
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            raise ValueError(f"polygon[{index}] deve ter 2 coordenadas [x, y]")
+        try:
+            x, y = float(point[0]), float(point[1])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"polygon[{index}] contém coordenada inválida") from exc
+        if not (np.isfinite(x) and np.isfinite(y)):
+            raise ValueError(f"polygon[{index}] contém coordenada não finita")
+        points.append([x, y])
+
+    warnings: list[dict[str, str]] = []
+    changes: list[str] = []
+    array = np.asarray(points, dtype=np.float64)
+
+    if image_shape is not None:
+        height, width = int(image_shape[0]), int(image_shape[1])
+        if height <= 0 or width <= 0:
+            raise ValueError("image_shape inválido")
+        clipped = np.column_stack(
+            (
+                np.clip(array[:, 0], 0.0, max(0.0, width - 1.0)),
+                np.clip(array[:, 1], 0.0, max(0.0, height - 1.0)),
+            )
+        )
+        if not np.allclose(clipped, array, atol=1e-9):
+            array = clipped
+            changes.append("clipped_to_image")
+            warnings.append(
+                {
+                    "code": "polygon_clipped",
+                    "message": "Vértices fora da imagem foram trazidos para a borda.",
+                }
+            )
+
+    array, duplicates, removed = _drop_redundant_vertices(array)
+    if duplicates:
+        changes.append("duplicate_vertices_removed")
+        warnings.append(
+            {
+                "code": "polygon_duplicate_vertices",
+                "message": f"{duplicates} vértice(s) duplicado(s) removido(s).",
+            }
+        )
+    if removed:
+        changes.append("redundant_vertices_removed")
+        warnings.append(
+            {
+                "code": "polygon_redundant_vertices",
+                "message": f"{removed} vértice(s) redundante(s) removido(s).",
+            }
+        )
+    if len(array) < 3:
+        raise ValueError("Polígono degenerado: menos de 3 vértices após sanitização")
+
+    if polygon_self_intersects(array):
+        array = _repair_self_intersections(array)
+        array, extra_duplicates, extra_removed = _drop_redundant_vertices(array)
+        duplicates += extra_duplicates
+        removed += extra_removed
+        changes.append("self_intersections_repaired")
+        warnings.append(
+            {
+                "code": "polygon_self_intersections",
+                "message": "Autointerseções corrigidas pelo contorno externo da região.",
+            }
+        )
+
+    area = _signed_polygon_area(array)
+    if abs(area) <= POLYGON_MIN_AREA_PX:
+        raise ValueError("Polígono degenerado: área nula após sanitização")
+    if area < 0:
+        array = array[::-1]
+        changes.append("orientation_normalized")
+        warnings.append(
+            {
+                "code": "polygon_orientation",
+                "message": "Orientação do polígono normalizada (sentido anti-horário).",
+            }
+        )
+
+    cleaned = [[float(x), float(y)] for x, y in array]
+    return cleaned, {"changes": changes, "warnings": warnings}
+
+
 def _polygon_mask(
     shape: tuple[int, int], polygon_pts: list[list[float]]
 ) -> np.ndarray:
-    points = np.asarray(polygon_pts, dtype=np.float64)
-    if points.ndim != 2 or points.shape[1] != 2 or len(points) < 3:
-        raise ValueError("Polígono inválido: mínimo de 3 vértices [x, y]")
+    cleaned, _ = sanitize_polygon(polygon_pts, shape)
+    points = np.asarray(cleaned, dtype=np.float64)
     mask = np.zeros(shape, dtype=np.uint8)
     cv2.fillPoly(mask, [np.rint(points).astype(np.int32)], 255)
     if cv2.countNonZero(mask) == 0:
@@ -958,24 +1317,26 @@ def measure_stria_polygon(
     aligned_img_path: str,
     polygon_pts: list[list[float]],
     px_per_mm: float,
-) -> dict[str, float]:
+) -> dict[str, object]:
     """Mede uma região-alvo delimitada por polígono na imagem alinhada.
 
-    Calcula área, largura máxima, largura média e comprimento a partir da
-    máscara (eixo principal via PCA) e da transformada de distância, além do
-    contraste perceptual CIEDE2000 entre o interior da região e o anel de
-    pele saudável ao redor.
+    O polígono passa por ``sanitize_polygon`` antes de qualquer cálculo
+    (duplicados, colineares, autointerseções e orientação). O comprimento é
+    validado contra limites físicos plausíveis; calibrações absurdas são
+    rejeitadas em vez de produzir valores em mm sem significado.
 
     Returns:
         Dicionário com ``length_mm``, ``mean_width_mm``, ``max_width_mm``,
-        ``area_mm2`` e ``delta_e_00``.
+        ``area_mm2`` e ``delta_e_00``. Os avisos de sanitização ficam com o
+        chamador (``sanitize_polygon``) para não poluir o contrato numérico.
     """
     if px_per_mm <= 0:
         raise ValueError("px_per_mm deve ser maior que zero")
 
     image = read_image_bgr(aligned_img_path)
     height, width = image.shape[:2]
-    mask = _polygon_mask((height, width), polygon_pts)
+    cleaned, _geometry = sanitize_polygon(polygon_pts, (height, width))
+    mask = _polygon_mask((height, width), cleaned)
 
     pixel_count = int(cv2.countNonZero(mask))
     area_mm2 = pixel_count / (px_per_mm**2)
@@ -985,6 +1346,22 @@ def measure_stria_polygon(
     mean_width_px = dimensions["mean_width_px"]
     max_width_px = dimensions["max_width_px"]
 
+    length_mm = length_px / px_per_mm
+    diagonal_mm = float(np.hypot(width, height)) / px_per_mm
+    if length_mm < MIN_PLAUSIBLE_LENGTH_MM:
+        raise ValueError(
+            "Comprimento anômalo: "
+            f"{length_mm:.3f} mm é menor que o mínimo plausível "
+            f"({MIN_PLAUSIBLE_LENGTH_MM} mm). Verifique a escala px/mm."
+        )
+    if length_mm > MAX_PLAUSIBLE_LENGTH_MM or length_mm > diagonal_mm * 1.05:
+        raise ValueError(
+            "Comprimento anômalo: "
+            f"{length_mm:.1f} mm excede o limite plausível "
+            f"({min(MAX_PLAUSIBLE_LENGTH_MM, diagonal_mm):.1f} mm). "
+            "Verifique a calibração da régua (px/mm) e o contorno."
+        )
+
     lab = bgr_to_cielab_float(image)
     stria_lab = _mask_mean_lab(lab, mask)
     ring = _ring_mask(mask, px_per_mm)
@@ -992,7 +1369,7 @@ def measure_stria_polygon(
     delta_e = float(delta_e_ciede2000(stria_lab, ring_lab))
 
     return {
-        "length_mm": length_px / px_per_mm,
+        "length_mm": length_mm,
         "mean_width_mm": mean_width_px / px_per_mm,
         "max_width_mm": max_width_px / px_per_mm,
         "area_mm2": float(area_mm2),
