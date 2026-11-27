@@ -381,13 +381,41 @@ def test_about_screen_letter_content_and_credits():
 
 def test_about_logo_click_easter_egg_contract():
     js = _js()
+    html = _html()
+    assert 'id="about-logo"' in html
+    assert 'id="about-dedication"' in html
+    assert "const ABOUT_LOGO_CLICK_WINDOW_MS = 2000" in js
+
     fn = js.split("function onAboutLogoClick", 1)[1].split("\n}\n", 1)[0]
+    # Delegação: o clique pode vir do <img> interno do logotipo.
+    assert 'closest("#about-logo")' in fn
+    assert "Date.now()" in fn
+    assert "aboutLogoLastClickAt > ABOUT_LOGO_CLICK_WINDOW_MS" in fn
     assert "aboutLogoClickCount < 5" in fn
     assert "about-dedication" in fn
     assert "is-visible" in fn
+    assert "scrollIntoView" in fn
     # Segundo clique depois de revelada esconde a dedicatória.
     assert "aboutDedicationVisible" in fn
-    assert "hidden = true" in fn
+    assert "hideAboutDedication()" in fn
+
+    # O handler é conectado no início de bindEvents, via delegação no documento,
+    # independentemente dos demais bindings da UI.
+    bind = js.split("function bindEvents()", 1)[1].split("\n}\n", 1)[0]
+    assert 'document.addEventListener("click", onAboutLogoClick, true)' in bind
+    assert bind.index("onAboutLogoClick") < bind.index('const canvas = $("stage")')
+    assert '$("about-logo")?.addEventListener' not in js
+
+    # Contador zerado ao abrir e ao fechar o modal.
+    open_fn = js.split("function openAboutModal()", 1)[1].split("\n}\n", 1)[0]
+    assert "resetAboutLogoSequence()" in open_fn
+    close_fn = js.split("function closeAboutModal()", 1)[1].split("\n}\n", 1)[0]
+    assert "hideAboutDedication()" in close_fn
+    hide_fn = js.split("function hideAboutDedication()", 1)[1].split("\n}\n", 1)[0]
+    assert "resetAboutLogoSequence()" in hide_fn
+    assert "hidden = true" in hide_fn
+    assert 'classList.remove("is-visible")' in hide_fn
+
     css = _css()
     assert ".about-dedication" in css
     assert "transition: opacity" in css

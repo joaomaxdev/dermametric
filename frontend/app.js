@@ -6575,12 +6575,29 @@ function onHelpBadgeClick(event) {
 /* --------------------------------------------------------------------------
    Tela "Sobre" (carta institucional) e dedicatória discreta
    -------------------------------------------------------------------------- */
+const ABOUT_LOGO_CLICK_WINDOW_MS = 2000;
 let aboutLogoClickCount = 0;
+let aboutLogoLastClickAt = 0;
 let aboutDedicationVisible = false;
+
+function resetAboutLogoSequence() {
+  aboutLogoClickCount = 0;
+  aboutLogoLastClickAt = 0;
+}
+
+function hideAboutDedication() {
+  aboutDedicationVisible = false;
+  resetAboutLogoSequence();
+  const dedication = $("about-dedication");
+  if (!dedication) return;
+  dedication.classList.remove("is-visible");
+  dedication.hidden = true;
+}
 
 function openAboutModal() {
   const modal = $("about-modal");
   if (!modal) return;
+  resetAboutLogoSequence();
   modal.hidden = false;
   modal.setAttribute("aria-hidden", "false");
   document.body.classList.add("has-modal");
@@ -6594,13 +6611,7 @@ function closeAboutModal() {
   if (!modal || modal.hidden) return;
   modal.hidden = true;
   modal.setAttribute("aria-hidden", "true");
-  aboutLogoClickCount = 0;
-  aboutDedicationVisible = false;
-  const dedication = $("about-dedication");
-  if (dedication) {
-    dedication.hidden = true;
-    dedication.classList.remove("is-visible");
-  }
+  hideAboutDedication();
   const otherOpen = [
     "profile-modal", "patient-modal", "pin-modal", "lock-patient-modal",
     "compare-modal", "personal-data-modal", "help-modal", "update-modal",
@@ -6611,14 +6622,28 @@ function closeAboutModal() {
   if (state.screen !== "lock" && !otherOpen) document.body.classList.remove("has-modal");
 }
 
-function onAboutLogoClick() {
+/**
+ * Easter egg do logotipo no modal "Sobre": 5 cliques dentro de 2 s revelam
+ * a dedicatória. Delegado no documento para sobreviver a qualquer
+ * re-renderização do modal e a falhas em bindings anteriores.
+ */
+function onAboutLogoClick(event) {
+  const target = event?.target;
+  const logo = target && typeof target.closest === "function"
+    ? target.closest("#about-logo")
+    : null;
+  if (!logo) return;
+
+  const now = Date.now();
+  if (now - aboutLogoLastClickAt > ABOUT_LOGO_CLICK_WINDOW_MS) {
+    aboutLogoClickCount = 0;
+  }
+  aboutLogoLastClickAt = now;
+
   const dedication = $("about-dedication");
   if (!dedication) return;
   if (aboutDedicationVisible) {
-    aboutDedicationVisible = false;
-    dedication.classList.remove("is-visible");
-    dedication.hidden = true;
-    aboutLogoClickCount = 0;
+    hideAboutDedication();
     return;
   }
   aboutLogoClickCount += 1;
@@ -6628,7 +6653,10 @@ function onAboutLogoClick() {
   dedication.hidden = false;
   // Duas frames garantem que a transição de opacidade seja percebida.
   requestAnimationFrame(() => {
-    requestAnimationFrame(() => dedication.classList.add("is-visible"));
+    requestAnimationFrame(() => {
+      dedication.classList.add("is-visible");
+      dedication.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
+    });
   });
 }
 
@@ -6642,6 +6670,9 @@ function onAboutKeyDown(event) {
 }
 
 function bindEvents() {
+  // Easter egg delegado e registrado primeiro: independe do restante da UI.
+  document.addEventListener("click", onAboutLogoClick, true);
+
   const canvas = $("stage");
   canvas.addEventListener("pointerdown", onPointerDown);
   canvas.addEventListener("pointermove", onPointerMove);
@@ -6673,7 +6704,6 @@ function bindEvents() {
   document.querySelectorAll("[data-close-about]").forEach((node) => {
     node.addEventListener("click", closeAboutModal);
   });
-  $("about-logo")?.addEventListener("click", onAboutLogoClick);
   document.addEventListener("keydown", onAboutKeyDown, true);
   $("update-open")?.addEventListener("click", openUpdateModal);
   $("update-check")?.addEventListener("click", checkForUpdates);
