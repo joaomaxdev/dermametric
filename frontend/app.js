@@ -38,29 +38,8 @@ const LOCAL_ALIGNMENT_REASONS = {
   ecc_failed: "falha no refinamento",
 };
 
-// Classificação Quantirides: 3 faixas por cor sobre o mapeamento de campo.
-const FIELD_CATEGORIES = [
-  { key: "cyan", color: "#06b6d4", label: "Ciano · finas/leves" },
-  { key: "magenta", color: "#ec4899", label: "Magenta · moderadas" },
-  { key: "amber", color: "#f59e0b", label: "Âmbar · largas/intensas" },
-];
-
-const FIELD_CRITERIA = {
-  width: { label: "Largura média (mm)", min: 0.1, max: 10, step: 0.1, unit: "mm" },
-  length: { label: "Comprimento (mm)", min: 1, max: 120, step: 1, unit: "mm" },
-  delta: { label: "Contraste ΔE00", min: 0, max: 20, step: 0.1, unit: "" },
-};
-
 const LANDMARK_SUGGESTIONS = [  "Umbigo", "Nevo lateral D", "Nevo lateral E", "Cicatriz",
   "Borda costal", "Crista ilíaca", "Linha média", "Referência lateral",
-];
-
-const GAIS_OPTIONS = [
-  { value: -1, label: "Muito pior", short: "Pior" },
-  { value: 0, label: "Sem mudança", short: "Igual" },
-  { value: 1, label: "Melhor", short: "Melhor" },
-  { value: 2, label: "Muito melhor", short: "M.melhor" },
-  { value: 3, label: "Extremamente melhor", short: "Ótimo" },
 ];
 
 const STEP_INFO = {
@@ -85,8 +64,8 @@ const STEP_INFO = {
   4: {
     kicker: "Passo 4 de 4",
     title: "Morfometria das regiões-alvo",
-    hint: "Selecione a lesão, clique nos vértices do polígono e feche a região para medir comprimento, largura, área e ΔE00.",
-    banner: "<b>Medição.</b> Clique para adicionar vértices · duplo clique ou <b>Fechar polígono</b> para concluir.",
+    hint: "Selecione a lesão e use o botão esquerdo para adicionar, arrastar ou inserir vértices; o botão direito remove pontos.",
+    banner: "<b>Medição.</b> Botão esquerdo: adiciona ou ajusta ponto · Botão direito: remove ponto · duplo clique ou <b>Fechar polígono</b> para concluir.",
   },
 };
 
@@ -130,28 +109,6 @@ const state = {
   polygonActive: false,
   polygonAuto: false,
   stria: "L1",
-  autoBox: null,
-  autoDrawing: false,
-  autoMode: "auto",
-  autoSensitivity: 0.5,
-  autoBusy: false,
-  morphMode: "lesions",
-  fieldRoiDrawing: false,
-  fieldMode: "auto",
-  fieldSensitivity: 0.5,
-  fieldMinLength: 4,
-  fieldMaxLength: 120,
-  fieldMinAspect: 2.5,
-  fieldBusy: false,
-  fieldCriteria: "width",
-  fieldThresholds: {
-    width: [1.0, 2.5],
-    length: [10, 30],
-    delta: [3.0, 6.0],
-  },
-  fieldRois: {},
-  fieldResults: {},
-  fieldSelected: null,
   importedRois: null,
   loupe: true,
   spaceDown: false,
@@ -159,7 +116,7 @@ const state = {
   hoverHit: null,
   landmarkPopover: null,
   compare: {
-    sessionId: "T2", mode: "natural", anon: false, pos: 50,
+    sessionId: "T2", mode: "natural", pos: 50,
     zoom: 1, panX: 0, panY: 0,
   },
   backupSummary: null,
@@ -184,7 +141,6 @@ let renderToken = 0;
 let drag = null;
 let press = null;
 let lastPolygonClick = null;
-let autoSegmentTimer = 0;
 let canvasSize = { w: 0, h: 0 };
 let pinch = null;
 let wasPinching = false;
@@ -2424,7 +2380,6 @@ async function openPatient(patientId, preloaded) {
     renderPatientHeader();
     renderSidebar();
     renderSessionTabs();
-    renderScales();
     renderStepNav();
     renderStepPanel();
     renderResults();
@@ -2478,7 +2433,6 @@ async function refreshSessions() {
   renderPatientHeader();
   renderSidebar();
   renderSessionTabs();
-  renderScales();
   renderStepNav();
   renderStepPanel();
   renderResults();
@@ -2508,8 +2462,7 @@ async function addSession() {
       syncToolsFromSession();
       renderSidebar();
       renderSessionTabs();
-      renderScales();
-      renderStepNav();
+        renderStepNav();
       renderStepPanel();
       renderResults();
       renderCompare();
@@ -2555,7 +2508,6 @@ async function removeSession(sessionId) {
     renderPatientHeader();
     renderSidebar();
     renderSessionTabs();
-    renderScales();
     renderStepNav();
     renderStepPanel();
     renderResults();
@@ -2840,7 +2792,9 @@ function hitTest(screenPoint) {
         return { type: "vertex", index, label: `vértice ${index + 1}` };
       }
     }
-    if (state.polygonActive && state.polygon.length >= 3) {
+    // Arestas valem para polígonos abertos (em edição) e fechados: o botão
+    // esquerdo insere um vértice e já permite arrastá-lo no mesmo gesto.
+    if (state.polygon.length >= 3) {
       for (let index = 0; index < state.polygon.length; index += 1) {
         const start = toScreen(state.polygon[index]);
         const end = toScreen(state.polygon[(index + 1) % state.polygon.length]);
@@ -2875,9 +2829,9 @@ function hitTest(screenPoint) {
 }
 
 function insertVertexOnEdge(hit) {
-  if (!hit || !Array.isArray(hit.point)) return;
+  if (!hit || !Array.isArray(hit.point)) return null;
   const index = Number(hit.index);
-  if (!Number.isInteger(index) || index < 0 || index >= state.polygon.length) return;
+  if (!Number.isInteger(index) || index < 0 || index >= state.polygon.length) return null;
   state.polygon.splice(index + 1, 0, [Number(hit.point[0]), Number(hit.point[1])]);
   state.polygonActive = true;
   state.hover = null;
@@ -2885,15 +2839,36 @@ function insertVertexOnEdge(hit) {
   updatePolygonStatus();
   scheduleRedraw();
   toast("Vértice inserido na aresta do polígono.", "info", 2200);
+  return index + 1;
+}
+
+/** Remove um vértice do polígono ativo (botão direito).
+ *
+ * Em polígonos fechados mantém a trava mínima de 3 vértices; se a remoção
+ * deixaria o contorno inválido, apenas avisa sem alterar o estado.
+ */
+function removePolygonVertex(index) {
+  const count = state.polygon.length;
+  if (!Number.isInteger(index) || index < 0 || index >= count) return false;
+  if (!state.polygonActive && count <= 3) {
+    toast("Um polígono fechado precisa de pelo menos 3 vértices.", "info", 3200);
+    return false;
+  }
+  state.polygon.splice(index, 1);
+  if (!state.polygon.length) state.polygonActive = false;
+  state.hover = null;
+  state.hoverHit = null;
+  updatePolygonStatus();
+  scheduleRedraw();
+  toast("Ponto removido. Os demais foram preservados.", "info", 2400);
+  return true;
 }
 
 function removePoint(hit) {
   if (!hit) return;
   hideLandmarkPopover();
   if (hit.type === "vertex") {
-    state.polygon.splice(hit.index, 1);
-    updatePolygonStatus();
-    scheduleRedraw();
+    removePolygonVertex(hit.index);
   } else if (hit.type === "landmark") {
     state.landmarks.splice(hit.index, 1);
     renderStepPanel();
@@ -3047,15 +3022,11 @@ function drawOverlays(ctx) {
   }
 
   if (state.step === 4) {
-    if (state.morphMode === "field") {
-      drawFieldScene(ctx, session);
-    } else {
     (session.measurements || []).forEach((m) => {
       const meta = lesionMeta(m.stria_code);
       drawPolygon(ctx, m.polygon, meta.stroke, meta.soft, lesionCode(m.stria_code), false);
     });
     drawGhostRois(ctx);
-    drawAutoBox(ctx, drag && drag.type === "autobox" ? drag.box : state.autoBox);
     const meta = lesionMeta(state.stria);
     if (state.polygon.length) {
       drawPolygon(ctx, state.polygon, meta.stroke, meta.soft, meta.short, true);
@@ -3074,68 +3045,9 @@ function drawOverlays(ctx) {
         ctx.restore();
       }
     }
-    }
   }
 
   if (state.step >= 2) drawScaleGuide(ctx);
-}
-
-function drawFieldScene(ctx, session) {
-  const roi = drag && drag.type === "fieldroi" ? drag.box : fieldRoiFor(session);
-  if (roi && roi[2] > 0 && roi[3] > 0) {
-    const origin = toScreen([roi[0], roi[1]]);
-    const w = roi[2] * view.zoom;
-    const h = roi[3] * view.zoom;
-    ctx.save();
-    ctx.fillStyle = "rgba(56,189,248,0.08)";
-    ctx.strokeStyle = "#38bdf8";
-    ctx.lineWidth = 1.6;
-    ctx.setLineDash([7, 5]);
-    ctx.fillRect(origin.x, origin.y, w, h);
-    ctx.strokeRect(origin.x, origin.y, w, h);
-    ctx.setLineDash([]);
-    ctx.fillStyle = "#bae6fd";
-    ctx.font = "700 10px Inter, system-ui, sans-serif";
-    ctx.fillText(state.fieldBusy ? "MAPEANDO…" : "ROI DE MAPEAMENTO", origin.x + 6, Math.max(12, origin.y - 6));
-    ctx.restore();
-  }
-
-  const result = fieldResultFor(session);
-  if (!result) return;
-  (result.objects || []).forEach((obj) => {
-    const category = FIELD_CATEGORIES[fieldCategoryIndex(obj)];
-    const screen = (obj.polygon || []).map(toScreen);
-    if (screen.length < 3) return;
-    const selected = state.fieldSelected
-      && state.fieldSelected.sessionId === session.id
-      && state.fieldSelected.id === obj.id;
-    ctx.save();
-    ctx.beginPath();
-    screen.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
-    ctx.closePath();
-    ctx.globalAlpha = 0.42;
-    ctx.fillStyle = category.color;
-    ctx.fill();
-    ctx.globalAlpha = 1;
-    ctx.strokeStyle = category.color;
-    ctx.lineWidth = selected ? 2.6 : 1.4;
-    ctx.stroke();
-    const centroid = screen.reduce(
-      (acc, p) => ({ x: acc.x + p.x / screen.length, y: acc.y + p.y / screen.length }),
-      { x: 0, y: 0 },
-    );
-    ctx.font = "800 10px Inter, system-ui, sans-serif";
-    const label = `#${obj.id}`;
-    const width = ctx.measureText(label).width + 10;
-    ctx.fillStyle = "rgba(6,12,17,0.82)";
-    roundRect(ctx, centroid.x - width / 2, centroid.y - 9, width, 18, 5);
-    ctx.fill();
-    ctx.fillStyle = category.color;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(label, centroid.x, centroid.y);
-    ctx.restore();
-  });
 }
 
 /**
@@ -3297,26 +3209,6 @@ function drawGhostRois(ctx) {
   ghostRois().forEach((roi) => {
     drawGhostPolygon(ctx, roi.points, { ...lesionMeta(roi.code), measured: roi.measured });
   });
-}
-
-/** Caixa de busca da auto-detecção, desenhada em tracejado azul. */
-function drawAutoBox(ctx, box) {
-  if (!box || box[2] <= 0 || box[3] <= 0) return;
-  const a = toScreen([box[0], box[1]]);
-  const w = box[2] * view.zoom;
-  const h = box[3] * view.zoom;
-  ctx.save();
-  ctx.fillStyle = "rgba(129,140,248,0.10)";
-  ctx.strokeStyle = "#818cf8";
-  ctx.lineWidth = 1.6;
-  ctx.setLineDash([6, 4]);
-  ctx.fillRect(a.x, a.y, w, h);
-  ctx.strokeRect(a.x, a.y, w, h);
-  ctx.setLineDash([]);
-  ctx.fillStyle = "#c7d2fe";
-  ctx.font = "700 10px Inter, system-ui, sans-serif";
-  ctx.fillText(state.autoBusy ? "SEGMENTANDO…" : "CAIXA DE BUSCA", a.x + 6, Math.max(12, a.y - 6));
-  ctx.restore();
 }
 
 function roundRect(ctx, x, y, w, h, r) {
@@ -3559,12 +3451,18 @@ function updateHoverHint(screenPoint) {
     const canvasRect = canvas.getBoundingClientRect();
     const wrapRect = wrap ? wrap.getBoundingClientRect() : canvasRect;
     tip.hidden = false;
-    tip.textContent = hit.type === "landmark" && hit.label
-      ? `Clique para remover: ${hit.label}`
-      : "Clique para remover este ponto";
+    if (hit.type === "vertex") {
+      tip.textContent = "Arraste para ajustar · botão direito remove";
+    } else if (hit.type === "edge") {
+      tip.textContent = "Clique para inserir um vértice na aresta";
+    } else if (hit.type === "landmark" && hit.label) {
+      tip.textContent = `Clique para remover: ${hit.label}`;
+    } else {
+      tip.textContent = "Clique para remover este ponto";
+    }
     tip.style.left = `${canvasRect.left - wrapRect.left + screenPoint.x}px`;
     tip.style.top = `${canvasRect.top - wrapRect.top + screenPoint.y}px`;
-    canvas.style.cursor = "pointer";
+    canvas.style.cursor = hit.type === "vertex" ? "grab" : "pointer";
   } else if (tip) {
     tip.hidden = true;
     canvas.style.cursor = state.spaceDown ? "grab" : "crosshair";
@@ -3591,6 +3489,12 @@ function onPointerDown(event) {
     }
   }
 
+  // Botão direito remove vértices (contextmenu) e nunca movimenta o palco.
+  if (event.button === 2) {
+    event.preventDefault();
+    return;
+  }
+
   if (event.button === 1 || (state.spaceDown && event.button === 0)) {
     event.preventDefault();
     press = { x: pt.x, y: pt.y, moved: false, button: event.button };
@@ -3600,41 +3504,31 @@ function onPointerDown(event) {
     return;
   }
 
-  if (event.button === 0 && state.step === 4 && !state.autoDrawing && state.polygonActive) {
-    const hit = hitTest(toScreen(pt.x, pt.y));
+  if (
+    event.button === 0
+    && state.step === 4
+    && state.polygon.length
+  ) {
+    const hit = hitTest(pt);
     if (hit && hit.type === "vertex") {
+      // Seleciona e arrasta o vértice existente; a remoção é só no direito.
       event.preventDefault();
       press = { x: pt.x, y: pt.y, moved: false, button: 0 };
       drag = { type: "vertex", index: hit.index };
       canvas.setPointerCapture?.(event.pointerId);
       return;
     }
-  }
-
-  if (event.button === 0 && state.step === 4 && state.morphMode === "field" && state.fieldRoiDrawing) {
-    event.preventDefault();
-    const imagePoint = toImage(pt.x, pt.y);
-    press = { x: pt.x, y: pt.y, moved: false, button: 0 };
-    drag = {
-      type: "fieldroi",
-      start: imagePoint,
-      box: [imagePoint[0], imagePoint[1], 0, 0],
-    };
-    canvas.setPointerCapture?.(event.pointerId);
-    return;
-  }
-
-  if (event.button === 0 && state.step === 4 && state.autoDrawing) {
-    event.preventDefault();
-    const imagePoint = toImage(pt.x, pt.y);
-    press = { x: pt.x, y: pt.y, moved: false, button: 0 };
-    drag = {
-      type: "autobox",
-      start: imagePoint,
-      box: [imagePoint[0], imagePoint[1], 0, 0],
-    };
-    canvas.setPointerCapture?.(event.pointerId);
-    return;
+    if (hit && hit.type === "edge") {
+      // Insere um vértice na aresta e já o arrasta no mesmo movimento.
+      event.preventDefault();
+      const index = insertVertexOnEdge(hit);
+      if (index !== null) {
+        press = { x: pt.x, y: pt.y, moved: false, button: 0 };
+        drag = { type: "vertex", index };
+        canvas.setPointerCapture?.(event.pointerId);
+        return;
+      }
+    }
   }
 
   if (event.button === 0 && state.step === 3 && state.roiDrawing && !isAlignedPreview()) {
@@ -3708,22 +3602,6 @@ function onPointerMove(event) {
       state.polygon[drag.index] = [imagePoint[0], imagePoint[1]];
     }
     scheduleRedraw();
-  } else if (drag && drag.type === "autobox") {
-    const start = drag.start;
-    const x = Math.min(start[0], imagePoint[0]);
-    const y = Math.min(start[1], imagePoint[1]);
-    const w = Math.abs(imagePoint[0] - start[0]);
-    const h = Math.abs(imagePoint[1] - start[1]);
-    drag.box = [x, y, w, h];
-    scheduleRedraw();
-  } else if (drag && drag.type === "fieldroi") {
-    const start = drag.start;
-    const x = Math.min(start[0], imagePoint[0]);
-    const y = Math.min(start[1], imagePoint[1]);
-    const w = Math.abs(imagePoint[0] - start[0]);
-    const h = Math.abs(imagePoint[1] - start[1]);
-    drag.box = [x, y, w, h];
-    scheduleRedraw();
   } else if (state.step === 4 && state.polygonActive) {
     scheduleRedraw();
   }
@@ -3742,32 +3620,6 @@ function onPointerMove(event) {
     drawLoupe(state.hover);
   } else {
     updateLoupeVisibility();
-  }
-
-  if (state.step === 4 && state.morphMode === "field") {
-    updateFieldTooltip(pt);
-  }
-}
-
-function updateFieldTooltip(screenPoint) {
-  const canvas = $("stage");
-  const tip = $("canvas-tip");
-  if (!canvas || !tip) return;
-  const hit = state.hover ? fieldHitTest(state.hover) : null;
-  if (hit) {
-    const wrap = $("canvas-wrap");
-    const canvasRect = canvas.getBoundingClientRect();
-    const wrapRect = wrap ? wrap.getBoundingClientRect() : canvasRect;
-    tip.hidden = false;
-    tip.dataset.field = "1";
-    tip.textContent = `#${hit.id} · Comp. ${fmt(hit.length_mm, 1)} mm · Larg. ${fmt(hit.mean_width_mm, 2)} mm · ΔE00 ${fmt(hit.delta_e00, 2)}`;
-    tip.style.left = `${canvasRect.left - wrapRect.left + screenPoint.x}px`;
-    tip.style.top = `${canvasRect.top - wrapRect.top + screenPoint.y}px`;
-    canvas.style.cursor = "pointer";
-  } else if (tip.dataset.field === "1") {
-    tip.hidden = true;
-    delete tip.dataset.field;
-    canvas.style.cursor = "crosshair";
   }
 }
 
@@ -3797,78 +3649,9 @@ function onPointerUp(event) {
   }
 
   if (drag && drag.type === "vertex") {
-    const index = drag.index;
-    const moved = Boolean(press && press.moved);
     drag = null;
     canvas.releasePointerCapture?.(event.pointerId);
-    if (!moved) {
-      removePoint({ type: "vertex", index, label: `vértice ${index + 1}` });
-    } else {
-      updatePolygonStatus();
-      scheduleRedraw();
-    }
-    press = null;
-    return;
-  }
-
-  if (drag && drag.type === "autobox") {
-    const box = drag.box;
-    drag = null;
-    state.autoDrawing = false;
-    canvas.releasePointerCapture?.(event.pointerId);
-    if (box && box[2] >= 8 && box[3] >= 8) {
-      const bounds = currentImage ? [currentImage.naturalWidth, currentImage.naturalHeight] : null;
-      let [x, y, w, h] = box;
-      if (bounds) {
-        x = Math.max(0, Math.min(bounds[0] - 1, x));
-        y = Math.max(0, Math.min(bounds[1] - 1, y));
-        w = Math.min(w, bounds[0] - x);
-        h = Math.min(h, bounds[1] - y);
-      }
-      state.autoBox = [
-        Math.max(0, Math.floor(x)),
-        Math.max(0, Math.floor(y)),
-        Math.max(1, Math.ceil(w)),
-        Math.max(1, Math.ceil(h)),
-      ];
-      renderStepPanel();
-      scheduleRedraw();
-      runAutoSegment();
-    } else {
-      renderStepPanel();
-      toast("Arraste uma caixa maior ao redor da lesão.", "error");
-    }
-    press = null;
-    return;
-  }
-
-  if (drag && drag.type === "fieldroi") {
-    const box = drag.box;
-    drag = null;
-    state.fieldRoiDrawing = false;
-    canvas.releasePointerCapture?.(event.pointerId);
-    const session = activeSession();
-    if (box && box[2] >= 8 && box[3] >= 8 && session) {
-      const bounds = currentImage ? [currentImage.naturalWidth, currentImage.naturalHeight] : null;
-      let [x, y, w, h] = box;
-      if (bounds) {
-        x = Math.max(0, Math.min(bounds[0] - 1, x));
-        y = Math.max(0, Math.min(bounds[1] - 1, y));
-        w = Math.min(w, bounds[0] - x);
-        h = Math.min(h, bounds[1] - y);
-      }
-      state.fieldRois[session.id] = [
-        Math.max(0, Math.floor(x)),
-        Math.max(0, Math.floor(y)),
-        Math.max(1, Math.ceil(w)),
-        Math.max(1, Math.ceil(h)),
-      ];
-      state.fieldSelected = null;
-      toast("ROI de mapeamento definida.", "success", 2600);
-    } else {
-      toast("Arraste uma área maior para a ROI de mapeamento.", "error");
-    }
-    renderStepPanel();
+    updatePolygonStatus();
     scheduleRedraw();
     press = null;
     return;
@@ -3905,6 +3688,16 @@ function onPointerUp(event) {
   press = null;
 }
 
+function onCanvasContextMenu(event) {
+  event.preventDefault();
+  if (state.step !== 4 || !state.polygon.length) return;
+  const pt = canvasPointFromEvent(event);
+  const hit = hitTest(pt);
+  if (hit && hit.type === "vertex") {
+    removePolygonVertex(hit.index);
+  }
+}
+
 function onDoubleClick() {
   if (state.step === 4 && state.polygonActive && state.polygon.length >= 3) {
     closePolygon();
@@ -3930,10 +3723,9 @@ function handleCanvasClick(point) {
 
   const hit = hitTest(toScreen(point));
   if (hit) {
-    if (hit.type === "edge") {
-      insertVertexOnEdge(hit);
-      return;
-    }
+    // Vértices e arestas são tratados no pointerdown (arrastar/inserir).
+    // Aqui permanece apenas a remoção por clique simples dos demais pontos.
+    if (hit.type === "vertex" || hit.type === "edge") return;
     removePoint(hit);
     return;
   }
@@ -3994,18 +3786,14 @@ function handleCanvasClick(point) {
       toast("Registre o alinhamento no passo 3 antes de medir.", "error");
       return;
     }
-    if (state.morphMode === "field") {
-      const hit = fieldHitTest(point);
-      if (hit) {
-        state.fieldSelected = { sessionId: session.id, id: hit.id };
-        renderStepPanel();
-        scheduleRedraw();
-        toast(`Estria #${hit.id} selecionada · escolha L1–L4 no painel para enviar.`, "info", 4200);
-      }
-      return;
-    }
     if (state.polygon.length >= 200) {
       toast("Limite de vértices atingido.", "error");
+      return;
+    }
+    // Fora do traçado (polígono já fechado) o clique livre não inicia um
+    // novo contorno por acidente; limpe ou use "Fechar polígono".
+    if (!state.polygonActive && state.polygon.length) {
+      toast("Polígono fechado: arraste um vértice, insira na aresta ou use “Limpar” para redesenhar.", "info", 3400);
       return;
     }
     state.polygon.push([point[0], point[1]]);
@@ -4043,7 +3831,6 @@ function onKeyDown(event) {
     state.polygon = [];
     state.polygonActive = false;
     state.polygonAuto = false;
-    state.autoDrawing = false;
     lastPolygonClick = null;
     updatePolygonStatus();
     scheduleRedraw();
@@ -4126,7 +3913,7 @@ function applyLandmarkLabel() {
 }
 
 /* --------------------------------------------------------------------------
-   Sessões: sidebar e escalas
+   Sessões: sidebar
    -------------------------------------------------------------------------- */
 function syncToolsFromSession() {
   const session = activeSession();
@@ -4149,15 +3936,11 @@ function syncToolsFromSession() {
   state.polygon = [];
   state.polygonActive = false;
   state.polygonAuto = false;
-  state.autoBox = null;
-  state.autoDrawing = false;
-  state.autoBusy = false;
   lastPolygonClick = null;
   state.hoverHit = null;
   state.landmarkPopover = null;
   state.roiDrawing = false;
   state.step3Preview = false;
-  state.pendingGais = undefined;
   if (!session.enhanced_image_url && state.mode === "enhanced") state.mode = "natural";
 }
 
@@ -4209,14 +3992,10 @@ function selectSession(id) {
   state.sessionId = id;
   state.step = 1;
   state.mode = "natural";
-  state.morphMode = "lesions";
-  state.fieldRoiDrawing = false;
-  state.fieldSelected = null;
   syncToolsFromSession();
   renderSidebar();
   renderSessionTabs();
   renderPatientHeader();
-  renderScales();
   renderStepNav();
   renderStepPanel();
   renderResults();
@@ -4224,89 +4003,6 @@ function selectSession(id) {
   view.autoFit = true;
   renderCanvas();
   updateHeader();
-}
-
-function renderScales() {
-  const box = $("scales-form");
-  const badge = $("scales-session");
-  const session = activeSession();
-  if (!box || !session) return;
-  if (badge) badge.textContent = sessionCode(session);
-  const scales = session.clinical_scales || { end_pain: 0, likert_satisfaction: 3, gais_score: 0, notes: "" };
-  const gais = Number(scales.gais_score) || 0;
-
-  box.innerHTML = `
-    <div class="scale-block">
-      <div class="scale-label"><span>Dor percebida (END) ${helpBadge("help-glossary-end", "END: escala numérica de dor, de 0 (sem dor) a 10 (pior dor imaginável).")}</span><strong id="end-value">${Number(scales.end_pain) || 0}<small>/10</small></strong></div>
-      <input id="end-input" type="range" min="0" max="10" step="1" value="${Number(scales.end_pain) || 0}" aria-label="Dor END 0 a 10" />
-      <div class="scale-ticks"><span>0 · sem dor</span><span>10 · máxima</span></div>
-    </div>
-    <div class="scale-block">
-      <div class="scale-label"><span>Satisfação (Likert) ${helpBadge("help-glossary-likert", "Likert: satisfação percebida pela paciente, de 1 (muito insatisfeita) a 5 (muito satisfeita).")}</span><strong id="likert-value">${Number(scales.likert_satisfaction) || 3}<small>/5</small></strong></div>
-      <input id="likert-input" type="range" min="1" max="5" step="1" value="${Number(scales.likert_satisfaction) || 3}" aria-label="Satisfação Likert 1 a 5" />
-      <div class="scale-ticks"><span>1 · insatisfeita</span><span>5 · muito satisfeita</span></div>
-    </div>
-    <div class="scale-block">
-      <div class="scale-label"><span>GAIS ${helpBadge("help-glossary-gais", "GAIS: melhora estética global percebida, de −1 (piora) a +3 (melhora ótima).")}</span><strong id="gais-value">${gais > 0 ? "+" : ""}${gais}<small>/ ±3</small></strong></div>
-      <div class="gais-scale" role="group" aria-label="GAIS de -1 a 3">
-        ${GAIS_OPTIONS.map((option) => `
-          <button type="button" data-gais="${option.value}" class="${option.value === gais ? "is-active" : ""}" aria-pressed="${option.value === gais}">
-            <strong>${option.value > 0 ? "+" : ""}${option.value}</strong><span>${option.short}</span>
-          </button>`).join("")}
-      </div>
-      <div class="scale-help">−1 = muito pior · 0 = sem mudança · +3 = extremamente melhor</div>
-    </div>
-    <div class="field">
-      <span>Notas clínicas</span>
-      <textarea id="notes-input" class="notes" rows="3" maxlength="4000" placeholder="Observações da consulta, intercorrências, adesão ao protocolo…">${esc(scales.notes || "")}</textarea>
-    </div>
-    <button type="button" class="btn btn-primary btn-block btn-sm" data-action="save-scales">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
-      Salvar escalas de ${esc(sessionCode(session))}
-    </button>
-  `;
-
-  const end = $("end-input");
-  const likert = $("likert-input");
-  if (end) {
-    end.addEventListener("input", () => {
-      $("end-value").innerHTML = `${end.value}<small>/10</small>`;
-    });
-  }
-  if (likert) {
-    likert.addEventListener("input", () => {
-      $("likert-value").innerHTML = `${likert.value}<small>/5</small>`;
-    });
-  }
-  box.querySelectorAll("[data-gais]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.pendingGais = Number(button.dataset.gais);
-      box.querySelectorAll("[data-gais]").forEach((b) => b.classList.toggle("is-active", b === button));
-      const value = Number(button.dataset.gais);
-      $("gais-value").innerHTML = `${value > 0 ? "+" : ""}${value}<small>/ ±3</small>`;
-    });
-  });
-}
-
-async function saveScales() {
-  const session = activeSession();
-  if (!session) return;
-  const payload = {
-    end_pain: Number($("end-input")?.value ?? 0),
-    likert_satisfaction: Number($("likert-input")?.value ?? 3),
-    gais_score: Number(state.pendingGais ?? session.clinical_scales?.gais_score ?? 0),
-    notes: $("notes-input")?.value ?? "",
-  };
-  try {
-    const response = await postJSON(sessionEndpoint(session, "/clinical-scales"), payload);
-    state.pendingGais = undefined;
-    state.sessions[session.id] = response.session;
-    renderSidebar();
-    renderScales();
-    toast(`Escalas de ${sessionCode(session)} salvas.`, "success");
-  } catch (error) {
-    toast(error.message, "error");
-  }
 }
 
 /* --------------------------------------------------------------------------
@@ -4331,8 +4027,6 @@ function setStep(step) {
   state.hoverHit = null;
   hideLandmarkPopover();
   if (step !== 3) state.step3Preview = false;
-  if (step !== 4) state.autoDrawing = false;
-  if (step !== 4) state.fieldRoiDrawing = false;
   updateHeader();
   renderStepNav();
   renderStepPanel();
@@ -4859,162 +4553,6 @@ async function doRegister() {
 /* --------------------------------------------------------------------------
    Passo 4 — Medição
    -------------------------------------------------------------------------- */
-function fieldResultFor(session) {
-  if (!session) return null;
-  return state.fieldResults[session.id] || null;
-}
-
-function fieldRoiFor(session) {
-  if (!session) return null;
-  return state.fieldRois[session.id] || null;
-}
-
-function fieldCriterionValue(obj) {
-  if (state.fieldCriteria === "length") return Number(obj.length_mm) || 0;
-  if (state.fieldCriteria === "delta") return Number(obj.delta_e00) || 0;
-  return Number(obj.mean_width_mm) || 0;
-}
-
-function fieldThresholds() {
-  const thresholds = state.fieldThresholds[state.fieldCriteria] || [0, 0];
-  return thresholds.map(Number);
-}
-
-function fieldCategoryIndex(obj) {
-  const [first, second] = fieldThresholds();
-  const value = fieldCriterionValue(obj);
-  if (value <= first) return 0;
-  if (value <= second) return 1;
-  return 2;
-}
-
-function fieldCategorySummary(result) {
-  const summary = FIELD_CATEGORIES.map((category) => ({
-    ...category,
-    count: 0,
-    area: 0,
-  }));
-  (result?.objects || []).forEach((obj) => {
-    const index = fieldCategoryIndex(obj);
-    summary[index].count += 1;
-    summary[index].area += Number(obj.area_mm2) || 0;
-  });
-  return summary;
-}
-
-function pointInPolygon(point, polygon) {
-  if (!Array.isArray(polygon) || polygon.length < 3) return false;
-  let inside = false;
-  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i, i += 1) {
-    const xi = Number(polygon[i][0]);
-    const yi = Number(polygon[i][1]);
-    const xj = Number(polygon[j][0]);
-    const yj = Number(polygon[j][1]);
-    const intersects = ((yi > point[1]) !== (yj > point[1]))
-      && (point[0] < ((xj - xi) * (point[1] - yi)) / ((yj - yi) || 1e-9) + xi);
-    if (intersects) inside = !inside;
-  }
-  return inside;
-}
-
-function fieldHitTest(point) {
-  const result = fieldResultFor(activeSession());
-  if (!result) return null;
-  return (result.objects || []).find((obj) => pointInPolygon(point, obj.polygon)) || null;
-}
-
-function fieldSummaryHTML(result) {
-  if (!result) {
-    return `<div class="results-empty">Desenhe uma ROI ampla e clique em “Mapear estrias na ROI”.</div>`;
-  }
-  const summary = result.summary || {};
-  const categories = fieldCategorySummary(result);
-  return `
-    <div class="metric-grid">
-      <div class="metric-card is-accent"><span>Total de estrias</span><strong id="field-total-count">${esc(String(summary.total_count ?? categories.reduce((sum, item) => sum + item.count, 0)))}</strong></div>
-      <div class="metric-card"><span>Área afetada</span><strong><span id="field-total-area">${fmt(summary.total_area_mm2, 1)}</span> <small>mm²</small></strong></div>
-      <div class="metric-card"><span>% da ROI</span><strong><span id="field-coverage">${fmt(summary.coverage_pct, 2)}</span> <small>%</small></strong></div>
-      <div class="metric-card"><span>Área da ROI</span><strong>${fmt(summary.roi_area_mm2, 0)} <small>mm²</small></strong></div>
-    </div>
-    <div class="field-legend" id="field-legend">
-      ${categories.map((category, index) => `
-        <div class="field-legend-item" style="--field-color:${category.color}">
-          <span class="field-legend-dot"></span>
-          <span class="field-legend-name">${esc(category.label)}</span>
-          <span class="field-legend-value"><b id="field-cat-${index}-count">${category.count}</b> estria(s) · <span id="field-cat-${index}-area">${fmt(category.area, 1)}</span> mm²</span>
-        </div>`).join("")}
-    </div>`;
-}
-
-function fieldPanelHTML(session) {
-  const roi = fieldRoiFor(session);
-  const result = fieldResultFor(session);
-  const criteria = FIELD_CRITERIA[state.fieldCriteria];
-  const thresholds = fieldThresholds();
-  const selected = state.fieldSelected && state.fieldSelected.sessionId === session.id
-    ? (result?.objects || []).find((obj) => obj.id === state.fieldSelected.id) || null
-    : null;
-
-  return `
-    <div class="field-scan">
-      <div class="section-title"><span>ROI de mapeamento</span><span>${roi ? `${Math.round(roi[2])} × ${Math.round(roi[3])} px` : "ampla"}</span></div>
-      <div class="form-actions">
-        <button type="button" class="btn btn-soft btn-sm ${state.fieldRoiDrawing ? "is-active" : ""}" data-action="field-draw-roi">
-          ${state.fieldRoiDrawing ? "Arraste a ROI na imagem…" : "Desenhar ROI"}
-        </button>
-        <button type="button" class="btn btn-primary btn-sm" data-action="field-scan" ${roi && !state.fieldBusy ? "" : "disabled"}>
-          ${state.fieldBusy ? "Mapeando…" : "Mapear estrias na ROI"}
-        </button>
-        <button type="button" class="btn btn-danger-ghost btn-sm" data-action="field-clear" ${roi || result ? "" : "disabled"}>Limpar</button>
-      </div>
-      <div class="auto-mode" role="group" aria-label="Perfil colorimétrico do mapeamento">
-        ${[["auto", "Auto"], ["rubra", "Rubra"], ["alba", "Alba"]].map(([value, label]) => `
-          <button type="button" data-field-mode="${value}" class="${state.fieldMode === value ? "is-active" : ""}" aria-pressed="${state.fieldMode === value}">${label}</button>`).join("")}
-      </div>
-      <label class="auto-sensitivity" for="field-sensitivity">
-        <span>Sensibilidade</span>
-        <input id="field-sensitivity" type="range" min="0.1" max="1" step="0.05" value="${state.fieldSensitivity}" />
-        <output id="field-sensitivity-value">${Number(state.fieldSensitivity).toFixed(2)}</output>
-      </label>
-      <div class="field-filter">
-        <label for="field-min-length">Comprimento mín. (mm)
-          <input id="field-min-length" type="number" min="0.5" step="0.5" value="${state.fieldMinLength}" />
-        </label>
-        <label for="field-max-length">Comprimento máx. (mm)
-          <input id="field-max-length" type="number" min="1" step="1" value="${state.fieldMaxLength}" />
-        </label>
-      </div>
-      <p class="form-hint">${roi ? "Ajuste sensibilidade e limites e clique em mapear; a classificação por cores é recalculada no cliente." : "Desenhe uma ROI retangular ampla sobre a área com estrias."}</p>
-    </div>
-
-    <div class="field-classification">
-      <div class="section-title"><span>Classificação por faixas</span><span>tempo real · Quantirides</span></div>
-      <label class="field-criteria" for="field-criteria">
-        <span>Critério</span>
-        <select id="field-criteria">
-          ${Object.entries(FIELD_CRITERIA).map(([value, item]) => `<option value="${value}" ${state.fieldCriteria === value ? "selected" : ""}>${esc(item.label)}</option>`).join("")}
-        </select>
-      </label>
-      ${[0, 1].map((index) => `
-        <label class="auto-sensitivity" for="field-threshold-${index + 1}">
-          <span>Limiar ${index + 1}${criteria.unit ? ` (${criteria.unit})` : ""}</span>
-          <input id="field-threshold-${index + 1}" data-field-threshold="${index}" type="range" min="${criteria.min}" max="${criteria.max}" step="${criteria.step}" value="${thresholds[index]}" />
-          <output id="field-threshold-${index + 1}-value">${fmt(thresholds[index], state.fieldCriteria === "delta" ? 1 : 1)}</output>
-        </label>`).join("")}
-      ${fieldSummaryHTML(result)}
-    </div>
-
-    ${selected ? `
-      <div class="field-selected">
-        <div class="section-title"><span>Estria #${selected.id}</span><span>enviar para lesão-alvo</span></div>
-        <p class="form-hint">Comp. ${fmt(selected.length_mm, 1)} mm · Larg. ${fmt(selected.mean_width_mm, 2)} mm · ΔE00 ${fmt(selected.delta_e00, 2)}</p>
-        <div class="form-actions">
-          ${LESIONS.map((item) => `<button type="button" class="btn btn-ghost btn-sm" data-action="field-assign" data-code="${item.code}">${item.code}</button>`).join("")}
-        </div>
-      </div>` : ""}
-  `;
-}
-
 function step4HTML(session) {
   const meta = lesionMeta(state.stria);
   const current = measurementFor(session, state.stria);
@@ -5087,44 +4625,18 @@ function step4HTML(session) {
 
     <div class="section-title"><span>Polígono ${helpBadge("help-glossary-morfometria", "Morfometria: área por Gauss/Shoelace convertida para mm² pela escala.")}</span><span id="poly-count">${count} vértice${count === 1 ? "" : "s"}</span></div>
     <div class="form-actions">
-      <button type="button" class="btn btn-primary btn-sm" data-action="measure-stria" ${count >= 3 && state.polygonActive ? "" : "disabled"}>Medir região</button>
+      <button type="button" class="btn btn-primary btn-sm" data-action="measure-stria" ${count >= 3 ? "" : "disabled"}>Medir região</button>
       <button type="button" class="btn btn-ghost btn-sm" data-action="undo-vertex" ${count ? "" : "disabled"}>Desfazer</button>
       <button type="button" class="btn btn-danger-ghost btn-sm" data-action="clear-polygon" ${count ? "" : "disabled"}>Limpar</button>
       ${isAlignedSpace() && referenceRois().some(r => r.code === lesionCode(state.stria)) ? `
         <button type="button" class="btn btn-soft btn-sm" data-action="import-rois" title="Importar o contorno de ${lesionCode(state.stria)} definido na sessão T0">
           Importar ROIs do T0
+        </button>
+        <button type="button" class="btn btn-ghost btn-sm" data-action="pin-t0-mask" title="Copia o polígono de T0 sem recalcular">
+          Fixar máscara de T0
         </button>` : ""}
     </div>
-    <p class="form-hint">${ready ? "Arraste vértices para ajustar · clique numa aresta para inserir · clique num vértice para remover · duplo clique fecha e mede." : "O polígono usa a imagem alinhada do passo 3."}</p>
-
-    ${ready ? `
-      <div class="auto-segment">
-        <div class="section-title"><span>Auto-detecção assistida</span><span>CIELAB + GrabCut</span></div>
-        <div class="form-actions">
-          <button type="button" class="btn btn-soft btn-sm ${state.autoDrawing ? "is-active" : ""}" data-action="auto-segment">
-            ${state.autoDrawing ? "Arraste a caixa na imagem…" : "Auto-detectar (Caixa)"}
-          </button>
-          ${t0Roi ? `
-            <button type="button" class="btn btn-soft btn-sm" data-action="auto-from-t0" ${state.autoBusy ? "disabled" : ""} title="Segmenta a lesão dentro do corredor do polígono de T0">
-              Auto-ajustar de T0
-            </button>
-            <button type="button" class="btn btn-ghost btn-sm" data-action="pin-t0-mask" title="Copia o polígono de T0 sem recalcular">
-              Fixar máscara de T0
-            </button>` : ""}
-        </div>
-        <label class="auto-sensitivity" for="auto-sensitivity">
-          <span>Sensibilidade</span>
-          <input id="auto-sensitivity" type="range" min="0.1" max="1" step="0.05" value="${state.autoSensitivity}" />
-          <output id="auto-sensitivity-value">${Number(state.autoSensitivity).toFixed(2)}</output>
-        </label>
-        <div class="auto-mode" role="group" aria-label="Perfil colorimétrico da auto-detecção">
-          ${[["auto", "Auto"], ["rubra", "Rubra"], ["alba", "Alba"]].map(([value, label]) => `
-            <button type="button" data-auto-mode="${value}" class="${state.autoMode === value ? "is-active" : ""}" aria-pressed="${state.autoMode === value}">${label}</button>`).join("")}
-        </div>
-        <p class="form-hint">${state.autoBox
-          ? `Caixa ${Math.round(state.autoBox[2])} × ${Math.round(state.autoBox[3])} px · revisão de vértices habilitada antes de medir.`
-          : "Desenhe uma caixa ao redor da lesão para segmentar automaticamente."}</p>
-      </div>` : ""}
+    <p class="form-hint">${ready ? "Botão esquerdo: adiciona ou ajusta ponto (arraste vértices ou clique na aresta para inserir) · Botão direito: remove ponto (mínimo 3 no polígono fechado) · duplo clique fecha e mede." : "O polígono usa a imagem alinhada do passo 3."}</p>
 
     ${current ? `
       <div class="section-title"><span>Resultado de ${esc(lesionLabel(session, current.stria_code, current.stria_label))}</span><span>${esc(formatResultTimestamp(current.created_at))}</span></div>
@@ -5139,15 +4651,7 @@ function step4HTML(session) {
       <p class="form-hint">Medição substitui o registro anterior desta região nesta sessão.</p>
     ` : `<div class="results-empty">Nenhuma medição de ${esc(meta.short)} nesta sessão.</div>`}
   `;
-  const modeSwitch = `
-    <div class="morph-mode" role="group" aria-label="Modo de morfometria">
-      <button type="button" data-action="morph-mode" data-mode="lesions" class="${state.morphMode === "lesions" ? "is-active" : ""}" aria-pressed="${state.morphMode === "lesions"}">Lesões-alvo (L1–L4)</button>
-      <button type="button" data-action="morph-mode" data-mode="field" class="${state.morphMode === "field" ? "is-active" : ""}" aria-pressed="${state.morphMode === "field"}">Mapeamento de Campo (ROI)</button>
-    </div>`;
-  const content = `${modeSwitch}${state.morphMode === "field" ? fieldPanelHTML(session) : body}`;
-  return state.morphMode === "field"
-    ? stepPanelShell("Mapeamento de campo (ROI)", "Detecte e classifique múltiplas estrias dentro de uma ROI ampla.", content)
-    : stepPanelShell("Morfometria da região-alvo", "Delimite a lesão sobre a imagem alinhada.", content);
+  return stepPanelShell("Morfometria da região-alvo", "Delimite a lesão sobre a imagem alinhada.", body);
 }
 
 function updatePolygonStatus() {
@@ -5159,7 +4663,7 @@ function updatePolygonStatus() {
   const measure = panel.querySelector('[data-action="measure-stria"]');
   const undo = panel.querySelector('[data-action="undo-vertex"]');
   const clear = panel.querySelector('[data-action="clear-polygon"]');
-  if (measure) measure.disabled = count < 3 || !state.polygonActive;
+  if (measure) measure.disabled = count < 3;
   if (undo) undo.disabled = count === 0;
   if (clear) clear.disabled = count === 0;
 }
@@ -5181,7 +4685,7 @@ function closePolygon() {
 }
 
 /* --------------------------------------------------------------------------
-   Auto-detecção assistida (caixa + CIELAB/GrabCut)
+   Geometria do polígono e referências de T0
    -------------------------------------------------------------------------- */
 function polygonAreaPx(points) {
   if (!Array.isArray(points) || points.length < 3) return 0;
@@ -5247,83 +4751,19 @@ function referenceRoiForActive() {
   return referenceRois().find((roi) => roi.code === lesionCode(state.stria)) || null;
 }
 
-function scheduleAutoSegment() {
-  window.clearTimeout(autoSegmentTimer);
-  if (!state.autoBox || state.autoDrawing) return;
-  autoSegmentTimer = window.setTimeout(() => runAutoSegment(), 340);
-}
-
-async function runAutoSegment(options = {}) {
-  const session = activeSession();
-  if (!session) return;
-  if (!session.aligned_image_url) {
-    toast("Conclua o alinhamento da sessão antes da segmentação automática.", "error");
-    return;
-  }
-  const box = (options.box || state.autoBox || []).map(Number);
-  if (box.length !== 4 || box[2] < 4 || box[3] < 4) {
-    toast("Desenhe uma caixa ao redor da lesão para auto-detectar.", "error");
-    return;
-  }
-  if (state.autoBusy) return;
-  const reference = referenceRoiForActive();
-  const seed = options.seed !== undefined
-    ? options.seed
-    : (reference ? reference.points : null);
-  const mode = options.mode || state.autoMode;
-  const sensitivity = options.sensitivity !== undefined ? options.sensitivity : state.autoSensitivity;
-
-  state.autoBusy = true;
+function applyReferencePolygon(reference) {
+  // Cópia profunda: a edição local não altera os polígonos de T0.
+  state.polygon = reference.points.map((point) => [Number(point[0]), Number(point[1])]);
+  // Importado já desbloqueado: vértices arrastáveis, arestas inseríveis e
+  // botão direito remove pontos, exatamente como num contorno desenhado à mão.
+  state.polygonActive = true;
+  state.polygonAuto = true;
+  state.hover = null;
+  state.hoverHit = null;
+  lastPolygonClick = null;
+  updatePolygonStatus();
+  renderStepPanel();
   scheduleRedraw();
-  try {
-    const response = await postJSON(sessionEndpoint(session, "/auto-segment"), {
-      box,
-      seed_polygon: seed
-        ? seed.map((point) => [Number(point[0]), Number(point[1])])
-        : null,
-      sensitivity: Number(sensitivity),
-      mode,
-    });
-    if (!Array.isArray(response.polygon) || response.polygon.length < 3) {
-      throw new Error("A segmentação automática não retornou um polígono válido.");
-    }
-    state.polygon = response.polygon.map((point) => [Number(point[0]), Number(point[1])]);
-    state.polygonActive = true;
-    state.polygonAuto = true;
-    state.hover = null;
-    state.hoverHit = null;
-    lastPolygonClick = null;
-    toast(
-      `Auto-detecção ${mode} · ${Math.round(Number(response.area_px) || 0)} px² · confiança ${Math.round((Number(response.confidence) || 0) * 100)}%`,
-      "success",
-      5200,
-    );
-  } catch (error) {
-    toast(error.message, "error");
-  } finally {
-    state.autoBusy = false;
-    updatePolygonStatus();
-    scheduleRedraw();
-  }
-}
-
-function autoSegmentFromT0() {
-  const reference = referenceRoiForActive();
-  if (!reference) {
-    toast(`T0 não possui ROI medida para ${lesionCode(state.stria)}.`, "error");
-    return;
-  }
-  const xs = reference.points.map((point) => Number(point[0]));
-  const ys = reference.points.map((point) => Number(point[1]));
-  const pad = Math.max(6, 0.08 * Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)));
-  state.autoBox = [
-    Math.floor(Math.min(...xs) - pad),
-    Math.floor(Math.min(...ys) - pad),
-    Math.ceil(Math.max(...xs) - Math.min(...xs) + 2 * pad),
-    Math.ceil(Math.max(...ys) - Math.min(...ys) + 2 * pad),
-  ];
-  state.autoDrawing = false;
-  runAutoSegment({ box: state.autoBox, seed: reference.points });
 }
 
 function pinT0Mask() {
@@ -5332,109 +4772,8 @@ function pinT0Mask() {
     toast(`T0 não possui ROI medida para ${lesionCode(state.stria)}.`, "error");
     return;
   }
-  state.polygon = reference.points.map((point) => [Number(point[0]), Number(point[1])]);
-  state.polygonActive = true;
-  state.polygonAuto = true;
-  state.autoDrawing = false;
-  state.hover = null;
-  state.hoverHit = null;
-  lastPolygonClick = null;
-  updatePolygonStatus();
-  renderStepPanel();
-  scheduleRedraw();
-  toast(`Máscara de ${lesionCode(state.stria)} fixada a partir de T0.`, "success", 4200);
-}
-
-async function runFieldScan() {
-  const session = activeSession();
-  if (!session) return;
-  if (!session.aligned_image_url) {
-    toast("Conclua o alinhamento da sessão antes do mapeamento de campo.", "error");
-    return;
-  }
-  if (!session.px_per_mm) {
-    toast("Calibre a régua antes do mapeamento de campo.", "error");
-    return;
-  }
-  const roi = fieldRoiFor(session);
-  if (!roi || roi[2] < 8 || roi[3] < 8) {
-    toast("Desenhe uma ROI retangular ampla antes de mapear.", "error");
-    return;
-  }
-  if (state.fieldBusy) return;
-  state.fieldBusy = true;
-  renderStepPanel();
-  scheduleRedraw();
-  try {
-    const response = await postJSON(sessionEndpoint(session, "/field-scan"), {
-      roi_box: roi.map(Number),
-      mode: state.fieldMode,
-      sensitivity: Number(state.fieldSensitivity),
-      min_length_mm: Number(state.fieldMinLength),
-      max_length_mm: Number(state.fieldMaxLength),
-      min_aspect_ratio: Number(state.fieldMinAspect),
-    });
-    state.fieldResults[session.id] = {
-      objects: Array.isArray(response.objects) ? response.objects : [],
-      summary: response.summary || {},
-    };
-    state.fieldSelected = null;
-    const summary = response.summary || {};
-    toast(
-      `Mapeamento ${state.fieldMode} · ${summary.total_count ?? 0} estria(s) · ${fmt(summary.total_area_mm2, 1)} mm² (${fmt(summary.coverage_pct, 2)}% da ROI)`,
-      "success",
-      5600,
-    );
-  } catch (error) {
-    toast(error.message, "error");
-  } finally {
-    state.fieldBusy = false;
-    renderStepPanel();
-    scheduleRedraw();
-  }
-}
-
-function updateFieldClassificationUI() {
-  const result = fieldResultFor(activeSession());
-  if (!result) return;
-  const categories = fieldCategorySummary(result);
-  categories.forEach((category, index) => {
-    const countNode = $(`field-cat-${index}-count`);
-    const areaNode = $(`field-cat-${index}-area`);
-    if (countNode) countNode.textContent = String(category.count);
-    if (areaNode) areaNode.textContent = fmt(category.area, 1);
-  });
-}
-
-async function assignFieldObject(code) {
-  const session = activeSession();
-  const result = fieldResultFor(session);
-  const selected = result && state.fieldSelected
-    ? (result.objects || []).find((obj) => obj.id === state.fieldSelected.id)
-    : null;
-  if (!session || !selected) {
-    toast("Selecione uma estria detectada no canvas.", "error");
-    return;
-  }
-  setBusy(true, "Enviando estria para a região-alvo…");
-  try {
-    const response = await postJSON(sessionEndpoint(session, "/measure"), {
-      stria_code: lesionCode(code),
-      stria_label: lesionLabel(session, code),
-      polygon: selected.polygon,
-    });
-    toast(
-      `Estria #${selected.id} enviada para ${lesionCode(code)} · ${fmt(response.area_mm2, 1)} mm²`,
-      "success",
-      5200,
-    );
-    await refreshSessions();
-    scheduleRedraw();
-  } catch (error) {
-    toast(error.message, "error");
-  } finally {
-    setBusy(false);
-  }
+  applyReferencePolygon(reference);
+  toast(`Máscara de ${lesionCode(state.stria)} fixada a partir de T0 · ajuste os vértices livremente.`, "success", 4800);
 }
 
 async function measureStria() {
@@ -5594,70 +4933,6 @@ function bindStepPanel() {
     input.addEventListener("change", () => saveLesionLabels());
   });
 
-  const sensitivity = $("auto-sensitivity");
-  if (sensitivity) {
-    sensitivity.addEventListener("input", () => {
-      state.autoSensitivity = Number(sensitivity.value) || 0.5;
-      const output = $("auto-sensitivity-value");
-      if (output) output.textContent = state.autoSensitivity.toFixed(2);
-      scheduleAutoSegment();
-    });
-  }
-
-  document.querySelectorAll("[data-auto-mode]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.autoMode = button.dataset.autoMode || "auto";
-      document.querySelectorAll("[data-auto-mode]").forEach((node) => {
-        const active = node === button;
-        node.classList.toggle("is-active", active);
-        node.setAttribute("aria-pressed", String(active));
-      });
-      if (state.autoBox) scheduleAutoSegment();
-    });
-  });
-
-  const fieldSensitivity = $("field-sensitivity");
-  if (fieldSensitivity) {
-    fieldSensitivity.addEventListener("input", () => {
-      state.fieldSensitivity = Number(fieldSensitivity.value) || 0.5;
-      const output = $("field-sensitivity-value");
-      if (output) output.textContent = state.fieldSensitivity.toFixed(2);
-    });
-  }
-
-  document.querySelectorAll("[data-field-mode]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.fieldMode = button.dataset.fieldMode || "auto";
-      document.querySelectorAll("[data-field-mode]").forEach((node) => {
-        const active = node === button;
-        node.classList.toggle("is-active", active);
-        node.setAttribute("aria-pressed", String(active));
-      });
-    });
-  });
-
-  const minLength = $("field-min-length");
-  if (minLength) {
-    minLength.addEventListener("change", () => {
-      state.fieldMinLength = Math.max(0.5, Number(minLength.value) || 4);
-    });
-  }
-  const maxLength = $("field-max-length");
-  if (maxLength) {
-    maxLength.addEventListener("change", () => {
-      state.fieldMaxLength = Math.max(1, Number(maxLength.value) || 120);
-    });
-  }
-
-  const criteria = $("field-criteria");
-  if (criteria) {
-    criteria.addEventListener("change", () => {
-      state.fieldCriteria = criteria.value || "width";
-      renderStepPanel();
-      scheduleRedraw();
-    });
-  }
-
   const ghostEnabled = $("ghost-enabled");
   if (ghostEnabled) {
     ghostEnabled.addEventListener("change", () => {
@@ -5675,21 +4950,6 @@ function bindStepPanel() {
     });
   }
 
-  document.querySelectorAll("[data-field-threshold]").forEach((input) => {
-    input.addEventListener("input", () => {
-      const index = Number(input.dataset.fieldThreshold);
-      const values = [...(state.fieldThresholds[state.fieldCriteria] || [0, 0])];
-      values[index] = Number(input.value) || 0;
-      // Mantém os limiares crescentes sem inverter as faixas.
-      if (index === 0 && values[0] > values[1]) values[1] = values[0];
-      if (index === 1 && values[1] < values[0]) values[0] = values[1];
-      state.fieldThresholds[state.fieldCriteria] = values;
-      const output = $(`field-threshold-${index + 1}-value`);
-      if (output) output.textContent = fmt(values[index], 1);
-      updateFieldClassificationUI();
-      scheduleRedraw();
-    });
-  });
 }
 
 async function saveLesionLabels() {
@@ -5802,54 +5062,7 @@ function handleAction(action, target) {
       scheduleRedraw();
       break;
     case "measure-stria": measureStria(); break;
-    case "auto-segment": {
-      const session = activeSession();
-      if (!session || !session.aligned_image_url) {
-        toast("Conclua o alinhamento desta sessão antes de auto-detectar.", "error");
-        break;
-      }
-      state.autoDrawing = !state.autoDrawing;
-      if (state.autoDrawing) toast("Arraste uma caixa ao redor da lesão.", "info", 3600);
-      renderStepPanel();
-      scheduleRedraw();
-      break;
-    }
-    case "auto-from-t0": autoSegmentFromT0(); break;
     case "pin-t0-mask": pinT0Mask(); break;
-    case "morph-mode": {
-      state.morphMode = target.dataset.mode === "field" ? "field" : "lesions";
-      state.fieldRoiDrawing = false;
-      state.autoDrawing = false;
-      state.fieldSelected = null;
-      renderStepPanel();
-      scheduleRedraw();
-      break;
-    }
-    case "field-draw-roi": {
-      const session = activeSession();
-      if (!session || !session.aligned_image_url) {
-        toast("Conclua o alinhamento desta sessão antes de mapear.", "error");
-        break;
-      }
-      state.fieldRoiDrawing = !state.fieldRoiDrawing;
-      if (state.fieldRoiDrawing) toast("Arraste uma ROI ampla sobre a área com estrias.", "info", 3600);
-      renderStepPanel();
-      scheduleRedraw();
-      break;
-    }
-    case "field-scan": runFieldScan(); break;
-    case "field-clear": {
-      const session = activeSession();
-      if (!session) break;
-      delete state.fieldRois[session.id];
-      delete state.fieldResults[session.id];
-      state.fieldSelected = null;
-      state.fieldRoiDrawing = false;
-      renderStepPanel();
-      scheduleRedraw();
-      break;
-    }
-    case "field-assign": assignFieldObject(target.dataset.code); break;
     case "close-polygon": closePolygon(); break;
     case "undo-vertex":
       state.polygon.pop();
@@ -5871,17 +5084,8 @@ function handleAction(action, target) {
         return;
       }
       // Deep copy: a edição local não altera os polígonos de T0.
-      state.polygon = roi.points.map((point) => [Number(point[0]), Number(point[1])]);
-      state.polygonActive = true;
-      state.polygonAuto = true;
-      state.hover = null;
-      state.hoverHit = null;
-      lastPolygonClick = null;
-      // A imagem do passo 4 já está no espaço alinhado ao T0.
-      updatePolygonStatus();
-      renderStepPanel();
-      scheduleRedraw();
-      toast(`ROI de ${target} importada de T0 · ajuste os vértices ou clique em “Medir região”.`, "success", 6000);
+      applyReferencePolygon(roi);
+      toast(`ROI de ${target} importada de T0 · vértices liberados para ajuste.`, "success", 6000);
       break;
     }
     case "clear-polygon":
@@ -5894,7 +5098,6 @@ function handleAction(action, target) {
       break;
     case "delete-measurement": deleteMeasurement(target.dataset.code); break;
     case "clear-measurements": clearMeasurements(); break;
-    case "save-scales": saveScales(); break;
     default: break;
   }
 }
@@ -5952,8 +5155,6 @@ function onDocumentClick(event) {
     state.polygon = [];
     state.polygonActive = false;
     state.polygonAuto = false;
-    state.autoBox = null;
-    state.autoDrawing = false;
     lastPolygonClick = null;
     renderStepPanel();
     scheduleRedraw();
@@ -6009,7 +5210,6 @@ function renderCompare() {
 
   updateBA();
   renderLongitudinal();
-  renderGaisBlind();
 }
 
 function updateBA() {
@@ -6040,11 +5240,10 @@ function updateBA() {
   assignImageElement(base, urls.base);
   assignImageElement(top, urls.top);
 
-  const anon = state.compare.anon;
   const t0 = baselineSession();
   const other = state.sessions[state.compare.sessionId];
-  if (left) left.textContent = anon ? "Antes" : `T0 · ${formatDate(t0?.captured_at) || "baseline"}`;
-  if (right) right.textContent = anon ? "Depois" : `${sessionCode(other)} · ${formatDate(other?.captured_at) || "seguimento"}`;
+  if (left) left.textContent = `T0 · ${formatDate(t0?.captured_at) || "baseline"}`;
+  if (right) right.textContent = `${sessionCode(other)} · ${formatDate(other?.captured_at) || "seguimento"}`;
   applyComparePosition();
   applyCompareZoom();
 }
@@ -6116,38 +5315,6 @@ function resetCompareZoom() {
   state.compare.panX = 0;
   state.compare.panY = 0;
   applyCompareZoom();
-}
-
-async function setGais(sessionId, value) {
-  const session = state.sessions[sessionId];
-  if (!session) return;
-  const current = session.clinical_scales || { end_pain: 0, likert_satisfaction: 3, notes: "" };
-  try {
-    const response = await postJSON(sessionEndpoint(session, "/clinical-scales"), {
-      end_pain: Number(current.end_pain) || 0,
-      likert_satisfaction: Number(current.likert_satisfaction) || 3,
-      gais_score: value,
-      notes: current.notes || "",
-    });
-    state.sessions[sessionId] = response.session;
-    renderGaisBlind();
-    renderScales();
-    renderSidebar();
-    toast(`GAIS de ${sessionCode(session)}: ${value > 0 ? "+" : ""}${value}.`, "success", 2600);
-  } catch (error) {
-    toast(error.message, "error");
-  }
-}
-
-function renderGaisBlind() {
-  const box = $("gais-options");
-  if (!box) return;
-  const session = state.sessions[state.compare.sessionId];
-  const score = Number(session?.clinical_scales?.gais_score ?? 0);
-  box.innerHTML = GAIS_OPTIONS.map((option) => `
-    <button type="button" data-compare-gais="${option.value}" class="${option.value === score ? "is-active" : ""}" title="${esc(option.label)}" aria-pressed="${option.value === score}">
-      ${option.value > 0 ? "+" : ""}${option.value}
-    </button>`).join("");
 }
 
 function metricCell(value, reference, digits, invert) {
@@ -6229,14 +5396,12 @@ function exportCSV() {
   lines.push([
     "sessao", "data_captura", "rotulo", "regiao", "descricao_regiao", "comprimento_mm", "largura_media_mm",
     "largura_maxima_mm", "area_mm2", "delta_e_00", "vertices", "medido_em",
-    "end_dor", "likert_satisfacao", "gais",
   ].join(";"));
   const exportOrder = state.order.length ? state.order : LEGACY_SESSION_IDS;
   exportOrder.forEach((id) => {
     const session = state.sessions[id];
     if (!session) return;
     (session.measurements || []).forEach((m) => {
-      const scales = session.clinical_scales || {};
       lines.push([
         sessionCode(session) || id,
         formatDate(session.captured_at),
@@ -6250,9 +5415,6 @@ function exportCSV() {
         csvNumber(m.delta_e_00),
         m.polygon?.length ?? "",
         `"${m.created_at || ""}"`,
-        scales.end_pain ?? "",
-        scales.likert_satisfaction ?? "",
-        scales.gais_score ?? "",
       ].join(";"));
     });
   });
@@ -7496,7 +6658,7 @@ function bindEvents() {
   });
   canvas.addEventListener("dblclick", onDoubleClick);
   canvas.addEventListener("wheel", onWheel, { passive: false });
-  canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+  canvas.addEventListener("contextmenu", onCanvasContextMenu);
 
   window.addEventListener("keydown", onKeyDown);
   window.addEventListener("keyup", onKeyUp);
@@ -7547,11 +6709,6 @@ function bindEvents() {
   });
   $("csv-export")?.addEventListener("click", exportCSV);
   $("pdf-report")?.addEventListener("click", exportPatientPDF);
-  $("compare-anon")?.addEventListener("change", (event) => {
-    state.compare.anon = event.target.checked;
-    $("compare-modal")?.classList.toggle("is-anon", state.compare.anon);
-    updateBA();
-  });
   $("compare-mode")?.addEventListener("click", (event) => {
     const button = event.target.closest("[data-mode]");
     if (!button) return;
@@ -7566,12 +6723,6 @@ function bindEvents() {
     state.compare.pos = 50;
     renderCompare();
   });
-  $("gais-options")?.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-compare-gais]");
-    if (!button) return;
-    setGais(state.compare.sessionId, Number(button.dataset.compareGais));
-  });
-
   const stage = $("ba-stage");
   const viewport = $("ba-viewport");
   let baDragging = false;

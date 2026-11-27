@@ -344,7 +344,7 @@
 
             <div class="security-block">
               <strong>Exportar Backup Completo (.dmbak)</strong>
-              <p class="form-hint">Inclui todos os prontuários, imagens, medições e escalas clínicas da estação.</p>
+              <p class="form-hint">Inclui todos os prontuários, imagens, medições e registros clínicos da estação.</p>
               <div class="field">
                 <span>Senha mestra</span>
                 <input id="backup-export-password" type="password" autocomplete="current-password" placeholder="Confirme a senha mestra" />
@@ -542,34 +542,32 @@
             <button type="button" class="help-jump" data-help="help-glossary-homografia">Como funciona a homografia →</button>
           </article>
 
-          <article class="help-entry" id="help-guide-passo4" data-help-entry tabindex="-1" data-help-search="passo 4 medicao poligono area comprimento largura delta e00 end likert gais escalas">
+          <article class="help-entry" id="help-guide-passo4" data-help-entry tabindex="-1" data-help-search="passo 4 medicao poligono area comprimento largura delta e00 morfometria">
             <div class="help-entry-head">
               <span class="help-step">4</span>
               <div>
-                <h3>Medição &amp; Escalas Clínicas</h3>
-                <p class="help-kicker">Morfometria objetiva + percepção clínica</p>
+                <h3>Medição das regiões-alvo</h3>
+                <p class="help-kicker">Morfometria objetiva da estria</p>
               </div>
             </div>
             <ul class="help-list">
-              <li>Selecione a região-alvo e clique nos vértices do <strong>polígono</strong> acompanhando o contorno da estria; duplo clique fecha e mede.</li>
+              <li>Selecione a região-alvo e desenhe o <strong>polígono</strong> ao redor da estria: <strong>Botão esquerdo: adiciona ou ajusta ponto</strong> (arraste vértices e clique na aresta para inserir) · <strong>Botão direito: remove ponto</strong> (mínimo de 3 no contorno fechado) · duplo clique fecha e mede.</li>
+              <li>Ao importar a lesão de <strong>T0</strong> (“Fixar máscara” ou “Importar ROIs”), o contorno refinado chega liberado para edição imediata de vértices.</li>
               <li>Leia automaticamente <strong>Área (<span class="math">mm²</span>), Comprimento, Largura média/máxima</strong> e <strong><span class="math">ΔE00</span></strong> vs. pele saudável.</li>
-              <li>Preencha as escalas <strong>END</strong> (dor 0–10), <strong>Likert</strong> (satisfação 1–5) e <strong>GAIS</strong> (−1 a +3).</li>
-              <li>Salve as escalas da sessão antes de mudar de T0 para T1, T2…</li>
             </ul>
             <button type="button" class="help-jump" data-help="help-glossary-morfometria">Ver cálculo de área →</button>
           </article>
 
-          <article class="help-entry" id="help-guide-comparativo" data-help-entry tabindex="-1" data-help-search="comparativo longitudinal avaliacao cega laudo pdf hash sha256 pin backup dmkey seguranca">
+          <article class="help-entry" id="help-guide-comparativo" data-help-entry tabindex="-1" data-help-search="comparativo longitudinal laudo pdf hash sha256 pin backup dmkey seguranca">
             <div class="help-entry-head">
               <span class="help-step is-final">✓</span>
               <div>
-                <h3>Comparativo, Avaliação Cega &amp; Laudo</h3>
+                <h3>Comparativo &amp; Laudo</h3>
                 <p class="help-kicker">Fechar o ciclo documental</p>
               </div>
             </div>
             <ul class="help-list">
               <li>Abra <strong>Comparativo Longitudinal &amp; Laudo</strong> para a cortina antes/depois e a matriz de evolução por métrica.</li>
-              <li>Ative a <strong>avaliação cega</strong>: as imagens aparecem sem identificação temporal para reduzir o viés de confirmação do GAIS.</li>
               <li>Exporte o <strong>laudo PDF</strong> com assinatura do profissional, perfil da clínica e <strong>fingerprint SHA-256</strong> dos registros.</li>
               <li>Finalize e proteja o prontuário com <strong>PIN</strong> (4–6 dígitos). Se esquecer o PIN, redefina com a <strong>senha mestra</strong>.</li>
               <li>Mantenha o backup do arquivo <strong><span class="mono">.dmkey</span></strong> fora do computador: é a única forma de recuperar a senha sem perder dados.</li>
@@ -703,32 +701,6 @@
               </ul>
             </article>
 
-            <article class="help-entry" id="help-glossary-end" data-help-entry tabindex="-1" data-help-search="end dor escala numerica 0 10 desconforto">
-              <h3>END — Escala Numérica de Dor</h3>
-              <p>Instrumento unidimensional de <strong>0</strong> (ausência de dor) a <strong>10</strong> (pior dor imaginável), para monitorar desconforto durante ou após o protocolo.</p>
-            </article>
-
-            <article class="help-entry" id="help-glossary-likert" data-help-entry tabindex="-1" data-help-search="likert satisfacao 1 5 percepcao resultado estetico">
-              <h3>Escala Likert de Satisfação</h3>
-              <p>Escala ordinal de <strong>1</strong> (muito insatisfeita) a <strong>5</strong> (muito satisfeita) que registra a percepção da paciente sobre o resultado estético.</p>
-            </article>
-
-            <article class="help-entry" id="help-glossary-gais" data-help-entry tabindex="-1" data-help-search="gais global aesthetic improvement escala -1 0 +1 +2 +3 melhora">
-              <h3>GAIS — <em>Global Aesthetic Improvement Scale</em></h3>
-              <p>Escala clínica padronizada de 5 pontos:</p>
-              <div class="gais-mini" aria-label="Valores da escala GAIS">
-                <span><b>−1</b> piora</span>
-                <span><b>0</b> inalterado</span>
-                <span><b>+1</b> melhora</span>
-                <span><b>+2</b> muita melhora</span>
-                <span><b>+3</b> melhora ótima</span>
-              </div>
-            </article>
-
-            <article class="help-entry" id="help-glossary-cega" data-help-entry tabindex="-1" data-help-search="avaliacao cega blinded assessment vies confirmacao ordem aleatoria antes depois">
-              <h3>Avaliação Cega (<em>Blinded Assessment</em>)</h3>
-              <p>As imagens de <span class="math">T0</span> e <span class="math">Tn</span> são exibidas lado a lado em <strong>ordem aleatória e sem identificação temporal</strong>, reduzindo o viés de confirmação do avaliador ao atribuir o escore GAIS.</p>
-            </article>
           </div>
 
           <div class="help-group" data-help-group>
@@ -1019,7 +991,7 @@
   </div>
 
   <div class="app-shell" hidden>
-    <aside id="workspace-sidebar" class="sidebar" aria-label="Sessões e escalas clínicas">
+    <aside id="workspace-sidebar" class="sidebar" aria-label="Sessões do paciente">
       <button type="button" id="rail-collapse-left" class="rail-collapse rail-collapse-left" aria-controls="workspace-sidebar" aria-expanded="true" title="Recolher barra lateral esquerda" aria-label="Recolher barra lateral esquerda">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6" /><path d="m20 18-6-6 6-6" /></svg>
         <span class="rail-collapse-label">Recolher</span>
@@ -1037,14 +1009,6 @@
         <div id="session-tabs" class="session-tabs" role="tablist" aria-label="Sessões clínicas"></div>
         <div id="session-list" class="session-list"></div>
         <p class="panel-foot">T0 é a referência geométrica e fotométrica das demais sessões.</p>
-      </section>
-
-      <section class="panel scales-panel">
-        <div class="panel-head">
-          <h2>Escalas clínicas</h2>
-          <span id="scales-session" class="pill">T0</span>
-        </div>
-        <div id="scales-form" class="scales-form"></div>
       </section>
     </aside>
 
@@ -1161,10 +1125,6 @@
               <button type="button" data-mode="natural" class="is-active">Natural</button>
               <button type="button" data-mode="enhanced">Realce CIELAB</button>
             </div>
-            <label class="check">
-              <input id="compare-anon" type="checkbox" />
-              <span>Ocultar identificação (GAIS cego)</span>
-            </label>
             <label class="check pdf-anon">
               <input id="pdf-include-name" type="checkbox" />
               <span>Incluir nome completo do(a) paciente no laudo PDF</span>
@@ -1192,14 +1152,6 @@
             <button id="ba-zoom-reset" class="btn btn-ghost btn-sm" type="button" title="Resetar zoom e enquadramento">Resetar</button>
           </div>
           <p class="compare-note">Arraste a cortina vertical ou clique na imagem para revelar antes e depois. Roda do mouse amplia, pinça (dois dedos) ou Shift+arraste move a imagem; use os botões para resetar.</p>
-
-          <div class="gais-blind">
-            <div class="gais-copy">
-              <h3>Avaliação cega — GAIS <button type="button" class="help-badge" data-help="help-glossary-cega" title="Avaliação cega: imagens sem identificação temporal para reduzir o viés de confirmação." aria-label="Ajuda: avaliação cega">?</button></h3>
-              <p>Compare antes e depois sem revelar o momento temporal e registe a melhora percebida.</p>
-            </div>
-            <div id="gais-options" class="gais-options" role="group" aria-label="GAIS"></div>
-          </div>
         </section>
 
         <section class="longitudinal">

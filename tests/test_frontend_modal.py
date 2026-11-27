@@ -527,44 +527,37 @@ def test_images_are_loaded_via_authenticated_fetch():
 
 
 # ---------------------------------------------------------------------------
-# Auto-detecção assistida (caixa + CIELAB/GrabCut) e guia por T0
+# Recursos removidos: auto-detecção por caixa e Mapeamento de Campo
 # ---------------------------------------------------------------------------
-def test_auto_segment_controls_and_api_calls():
-    js = _js()
-    # Ferramenta de caixa, seletor de perfil e painel de sensibilidade.
-    assert 'data-action="auto-segment"' in js
-    assert 'id="auto-sensitivity"' in js
-    assert 'data-auto-mode="${value}"' in js
-    assert '["auto", "Auto"], ["rubra", "Rubra"], ["alba", "Alba"]' in js
-    assert "Auto-detectar (Caixa)" in js
-    # Ações guiadas por T0 no seguimento.
-    assert 'data-action="auto-from-t0"' in js
-    assert 'data-action="pin-t0-mask"' in js
-    assert "Auto-ajustar de T0" in js
-    assert "Fixar máscara de T0" in js
-    # Chamada autenticada ao endpoint e envio do corredor/sensibilidade.
-    call = js.split("async function runAutoSegment", 1)[1].split("\n}", 1)[0]
-    assert '"/auto-segment"' in call
-    assert "seed_polygon" in call
-    assert "sensitivity" in call
-    assert "mode" in call
-    # Debounce da sensibilidade e edição fina do resultado.
-    assert "function scheduleAutoSegment" in js
-    assert "window.clearTimeout(autoSegmentTimer)" in js
-    assert "state.polygon = response.polygon" in call
-    assert "state.polygonAuto = true" in call
+def test_removed_auto_segment_controls_are_absent():
+    surface = _js() + _html()
+    # Controles, funções e chamadas da antiga auto-detecção por caixa.
+    for token in (
+        'data-action="auto-segment"',
+        'data-action="auto-from-t0"',
+        'id="auto-sensitivity"',
+        "Auto-detectar (Caixa)",
+        "Auto-ajustar de T0",
+        "function runAutoSegment",
+        "function scheduleAutoSegment",
+        "autoSegmentTimer",
+        '"/auto-segment"',
+        'type: "autobox"',
+        "function drawAutoBox",
+    ):
+        assert token not in surface
+    # A importação do contorno de T0 continua disponível.
+    assert 'data-action="pin-t0-mask"' in surface
+    assert "Fixar máscara de T0" in surface
 
 
-def test_auto_segment_ghost_overlay_and_t0_validation():
+def test_t0_ghost_overlay_and_validation():
     js = _js()
     # Fantasma tracejado translúcido dos polígonos de T0.
     assert "function drawGhostPolygon" in js
     assert "setLineDash([4, 4])" in js
     assert "drawGhostRois(ctx)" in js
-    # Caixa de busca desenhada por arraste.
-    assert "type: \"autobox\"" in js
-    assert "function drawAutoBox" in js
-    # Após a auto-detecção não sobra linha-guia solta; vértices já editáveis.
+    # Após importar de T0 não sobra linha-guia solta; vértices já editáveis.
     assert "!state.polygonAuto" in js
     assert "function insertVertexOnEdge" in js
     assert "function nearestPointOnSegment" in js
@@ -574,15 +567,68 @@ def test_auto_segment_ghost_overlay_and_t0_validation():
     assert "> 10" in js
     assert "1.35" in js
     assert "window.confirm(" in js
-    css = _css()
-    assert ".auto-segment" in css
-    assert ".auto-sensitivity" in css
-    assert ".auto-mode" in css
 
 
 # ---------------------------------------------------------------------------
 # Datas do card "Resultado de <lesão>"
 # ---------------------------------------------------------------------------
+def test_polygon_mouse_rules_left_edit_right_remove():
+    js = _js()
+    html = _html()
+
+    # Botão esquerdo arrasta vértice existente e insere na aresta já arrastando.
+    pointer_down = js.split("function onPointerDown(event)", 1)[1].split("\n}\n", 1)[0]
+    assert "event.button === 2" in pointer_down
+    assert "const hit = hitTest(pt)" in pointer_down
+    assert 'drag = { type: "vertex", index: hit.index }' in pointer_down
+    assert "const index = insertVertexOnEdge(hit)" in pointer_down
+    assert 'drag = { type: "vertex", index }' in pointer_down
+    # Clique simples no vértice não remove mais (remoção migrou para o direito).
+    pointer_up = js.split("function onPointerUp(event)", 1)[1].split("\n}\n", 1)[0]
+    vertex_branch = pointer_up.split('drag.type === "vertex"', 1)[1].split("return;", 1)[0]
+    assert "removePoint" not in vertex_branch
+    assert "removePolygonVertex" not in vertex_branch
+
+    # Contextmenu bloqueia o menu nativo e remove vértice com trava de 3.
+    assert "function onCanvasContextMenu(event)" in js
+    assert "onCanvasContextMenu" in js
+    assert 'canvas.addEventListener("contextmenu", onCanvasContextMenu)' in js
+    context = js.split("function onCanvasContextMenu(event)", 1)[1].split("\n}\n", 1)[0]
+    assert "event.preventDefault()" in context
+    assert 'hit.type === "vertex"' in context
+    assert "removePolygonVertex(hit.index)" in context
+
+    remove = js.split("function removePolygonVertex(index)", 1)[1].split("\n}\n", 1)[0]
+    assert "!state.polygonActive && count <= 3" in remove
+    assert "pelo menos 3 vértices" in remove
+
+    # Dicas refletem exatamente a regra; botão direito não faz pan.
+    assert "Botão esquerdo: adiciona ou ajusta ponto" in js
+    assert "Botão direito: remove ponto" in js
+    assert "Botão esquerdo: adiciona ou ajusta ponto" in html
+    assert "Botão direito: remove ponto" in html
+    assert 'event.button === 1 || (state.spaceDown && event.button === 0)' in js
+
+
+def test_reference_import_opens_polygon_for_immediate_editing():
+    js = _js()
+    apply = js.split("function applyReferencePolygon(reference)", 1)[1].split("\n}\n", 1)[0]
+    assert "state.polygon = reference.points.map" in apply
+    assert "state.polygonActive = true" in apply
+    assert "state.polygonAuto = true" in apply
+    assert "updatePolygonStatus()" in apply
+    assert "scheduleRedraw()" in apply
+
+    pin = js.split("function pinT0Mask()", 1)[1].split("\n}\n", 1)[0]
+    assert "applyReferencePolygon(reference)" in pin
+    import_case = js.split('case "import-rois"', 1)[1].split("break;", 1)[0]
+    assert "applyReferencePolygon(roi)" in import_case
+
+    # Editar um polígono fechado não bloqueia o recálculo métrico.
+    assert "measure.disabled = count < 3" in js
+    assert "count >= 3 ? \"\" : \"disabled\"" in js
+
+
 def test_result_card_parses_brazilian_dates():
     js = _js()
     # Parse explícito de DD/MM/YYYY antes de exibir no cabeçalho do card.
@@ -597,50 +643,32 @@ def test_result_card_parses_brazilian_dates():
 
 
 # ---------------------------------------------------------------------------
-# Mapeamento de Campo (ROI) — modo complementar Quantirides
+# Mapeamento de Campo (ROI) removido — sem resíduos na interface
 # ---------------------------------------------------------------------------
-def test_field_scan_mode_controls_exist():
-    js = _js()
-    css = _css()
-    # Seletor de modo no topo do painel do passo 4.
-    assert "Mapeamento de Campo (ROI)" in js
-    assert 'data-action="morph-mode"' in js
-    assert 'data-mode="field"' in js
-    assert 'data-mode="lesions"' in js
-    # ROI ampla, botão de mapeamento e perfis colorimétricos.
-    assert 'data-action="field-draw-roi"' in js
-    assert 'data-action="field-scan"' in js
-    assert "Mapear estrias na ROI" in js
-    assert 'data-field-mode=' in js
-    assert '["auto", "Auto"]' in js
-    assert '["rubra", "Rubra"]' in js
-    assert '["alba", "Alba"]' in js
-    assert "function runFieldScan" in js
-    assert '"/field-scan"' in js
-    # Filtro global.
-    assert 'id="field-min-length"' in js
-    assert 'id="field-max-length"' in js
-    assert 'id="field-sensitivity"' in js
-    # Classificação em 3 faixas com cores Quantirides.
-    assert "FIELD_CATEGORIES" in js
-    assert "#06b6d4" in js
-    assert "#ec4899" in js
-    assert "#f59e0b" in js
-    assert 'id="field-criteria"' in js
-    assert "data-field-threshold" in js
-    assert "function fieldCategoryIndex" in js
-    assert "function fieldCategorySummary" in js
-    assert "function updateFieldClassificationUI" in js
-    # Renderização com transparência e envio opcional para L1–L4.
-    assert "function drawFieldScene" in js
-    assert "ctx.globalAlpha = 0.42" in js
-    assert "function updateFieldTooltip" in js
-    assert 'data-action="field-assign"' in js
-    assert "function assignFieldObject" in js
-    # Persistência no estado da sessão.
-    assert "state.fieldResults[session.id]" in js
-
-    assert ".morph-mode" in css
-    assert ".field-scan" in css
-    assert ".field-classification" in css
-    assert ".field-legend" in css
+def test_removed_field_scan_controls_are_absent():
+    surface = _js() + _html() + _css()
+    for token in (
+        "Mapeamento de Campo (ROI)",
+        'data-action="morph-mode"',
+        'data-mode="field"',
+        "data-mode=\"lesions\"",
+        'data-action="field-draw-roi"',
+        'data-action="field-scan"',
+        "Mapear estrias na ROI",
+        "data-field-mode=",
+        '"/field-scan"',
+        "function runFieldScan",
+        "function drawFieldScene",
+        "function assignFieldObject",
+        "FIELD_CATEGORIES",
+        "fieldCategoryIndex",
+        "fieldCategorySummary",
+        "updateFieldClassificationUI",
+        "state.fieldRois",
+        "state.fieldResults",
+        ".morph-mode",
+        ".field-scan",
+        ".field-classification",
+        ".field-legend",
+    ):
+        assert token not in surface

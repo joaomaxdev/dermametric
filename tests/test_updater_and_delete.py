@@ -106,7 +106,7 @@ def patient_with_images(client) -> tuple[str, str, list[Path]]:
 # Versão e rotas de atualização
 # ---------------------------------------------------------------------------
 def test_app_version_matches_current_release():
-    assert APP_VERSION == "1.0.5"
+    assert APP_VERSION == "1.1.0"
 
 
 def test_health_reports_app_version(station):

@@ -143,12 +143,10 @@ def test_local_elastic_refinement_feeds_t0_references():
     assert "referencePoints" in rois
     assert "entry.polygon" in rois
 
-    # Fantasma, "Fixar máscara" e seed de auto-ajuste usam referenceRois().
+    # Fantasma de T0 e "Fixar máscara" usam referenceRois().
     ghost = js.split("function ghostRois()", 1)[1].split("\n}", 1)[0]
     assert "referenceRois()" in ghost
     pin = js.split("function pinT0Mask()", 1)[1].split("\n}", 1)[0]
     assert "referenceRoiForActive()" in pin
-    seed = js.split("function autoSegmentFromT0()", 1)[1].split("\n}", 1)[0]
-    assert "referenceRoiForActive()" in seed
     active = js.split("function referenceRoiForActive()", 1)[1].split("\n}", 1)[0]
     assert "referenceRois()" in active
