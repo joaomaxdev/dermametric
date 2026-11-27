@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 # Códigos flexíveis: L1..L4 (novo padrão) e E1..E4 (legado).
 StriaCode = Annotated[
@@ -142,6 +142,106 @@ class MeasureRequest(BaseModel):
         return points
 
 
+class AutoSegmentRequest(BaseModel):
+    """Segmentação assistida por CIELAB + GrabCut, guiada por uma caixa."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    box: list[float] = Field(
+        min_length=4,
+        max_length=4,
+        description="[x, y, w, h] da caixa de busca na imagem alinhada",
+    )
+    seed_polygon: list[Point] | None = Field(
+        default=None,
+        min_length=3,
+        description="Polígono de referência (T0) usado como corredor de busca",
+    )
+    sensitivity: float = Field(
+        default=0.5,
+        ge=0.1,
+        le=1.0,
+        description="Sensibilidade da segmentação (0.1 conservadora, 1.0 permissiva)",
+    )
+    mode: Literal["auto", "rubra", "alba"] = Field(
+        default="auto",
+        description="Perfil colorimétrico: rubra (eritema), alba (hipocromia) ou auto",
+    )
+
+    @field_validator("box")
+    @classmethod
+    def _check_box(cls, value: list[float]) -> list[float]:
+        x, y, w, h = (float(item) for item in value)
+        if w <= 0 or h <= 0:
+            raise ValueError("box deve ter largura e altura positivas")
+        if x < 0 or y < 0:
+            raise ValueError("box não pode ter coordenadas negativas")
+        return [x, y, w, h]
+
+    @field_validator("seed_polygon")
+    @classmethod
+    def _check_seed(cls, value: list[list[float]] | None) -> list[list[float]] | None:
+        if value is None:
+            return None
+        points = [_validate_point(p, f"seed_polygon[{i}]") for i, p in enumerate(value)]
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        if max(xs) - min(xs) < 1 or max(ys) - min(ys) < 1:
+            raise ValueError("seed_polygon degenerado: área nula")
+        return points
+
+
+class FieldScanRequest(BaseModel):
+    """Mapeamento de campo: ROI ampla para detecção múltipla de estrias."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    roi_box: list[float] = Field(
+        min_length=4,
+        max_length=4,
+        description="[x, y, w, h] da ROI no referencial alinhado da sessão",
+    )
+    mode: Literal["auto", "rubra", "alba"] = Field(
+        default="auto",
+        description="Perfil colorimétrico: rubra (eritema), alba (hipocromia) ou auto",
+    )
+    sensitivity: float = Field(
+        default=0.5,
+        ge=0.1,
+        le=1.0,
+        description="Sensibilidade do mapeamento (0.1 conservadora, 1.0 permissiva)",
+    )
+    min_length_mm: float = Field(
+        default=4.0, gt=0, description="Comprimento mínimo aceito (mm)"
+    )
+    max_length_mm: float = Field(
+        default=120.0, gt=0, description="Comprimento máximo aceito (mm)"
+    )
+    min_aspect_ratio: float = Field(
+        default=2.5,
+        gt=0,
+        description="Razão comprimento/largura mínima (filtra poros circulares)",
+    )
+
+    @field_validator("roi_box")
+    @classmethod
+    def _check_roi_box(cls, value: list[float]) -> list[float]:
+        x, y, w, h = (float(item) for item in value)
+        if w <= 0 or h <= 0:
+            raise ValueError("roi_box deve ter largura e altura positivas")
+        if x < 0 or y < 0:
+            raise ValueError("roi_box não pode ter coordenadas negativas")
+        return [x, y, w, h]
+
+    @field_validator("max_length_mm")
+    @classmethod
+    def _check_lengths(cls, value: float, info: ValidationInfo) -> float:
+        minimum = info.data.get("min_length_mm")
+        if minimum is not None and value <= minimum:
+            raise ValueError("max_length_mm deve ser maior que min_length_mm")
+        return value
+
+
 class ClinicalScalesRequest(BaseModel):
     """Escalas clínicas subjetivas registradas na sessão."""
 
@@ -202,8 +302,10 @@ class LesionLabelsRequest(BaseModel):
 
 # Mantido para compatibilidade com importações antigas.
 __all__ = [
+    "AutoSegmentRequest",
     "CalibrationRequest",
     "ClinicalScalesRequest",
+    "FieldScanRequest",
     "LandmarkPoint",
     "LesionLabelsRequest",
     "MeasureRequest",

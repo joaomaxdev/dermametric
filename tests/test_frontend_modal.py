@@ -524,3 +524,123 @@ def test_images_are_loaded_via_authenticated_fetch():
     assert "hydrateThumbnails(panel)" in js
     assert "assignImageElement(base, urls.base)" in js
     assert "assignImageElement(top, urls.top)" in js
+
+
+# ---------------------------------------------------------------------------
+# Auto-detecção assistida (caixa + CIELAB/GrabCut) e guia por T0
+# ---------------------------------------------------------------------------
+def test_auto_segment_controls_and_api_calls():
+    js = _js()
+    # Ferramenta de caixa, seletor de perfil e painel de sensibilidade.
+    assert 'data-action="auto-segment"' in js
+    assert 'id="auto-sensitivity"' in js
+    assert 'data-auto-mode="${value}"' in js
+    assert '["auto", "Auto"], ["rubra", "Rubra"], ["alba", "Alba"]' in js
+    assert "Auto-detectar (Caixa)" in js
+    # Ações guiadas por T0 no seguimento.
+    assert 'data-action="auto-from-t0"' in js
+    assert 'data-action="pin-t0-mask"' in js
+    assert "Auto-ajustar de T0" in js
+    assert "Fixar máscara de T0" in js
+    # Chamada autenticada ao endpoint e envio do corredor/sensibilidade.
+    call = js.split("async function runAutoSegment", 1)[1].split("\n}", 1)[0]
+    assert '"/auto-segment"' in call
+    assert "seed_polygon" in call
+    assert "sensitivity" in call
+    assert "mode" in call
+    # Debounce da sensibilidade e edição fina do resultado.
+    assert "function scheduleAutoSegment" in js
+    assert "window.clearTimeout(autoSegmentTimer)" in js
+    assert "state.polygon = response.polygon" in call
+    assert "state.polygonAuto = true" in call
+
+
+def test_auto_segment_ghost_overlay_and_t0_validation():
+    js = _js()
+    # Fantasma tracejado translúcido dos polígonos de T0.
+    assert "function drawGhostPolygon" in js
+    assert "setLineDash([4, 4])" in js
+    assert "drawGhostRois(ctx)" in js
+    # Caixa de busca desenhada por arraste.
+    assert "type: \"autobox\"" in js
+    assert "function drawAutoBox" in js
+    # Após a auto-detecção não sobra linha-guia solta; vértices já editáveis.
+    assert "!state.polygonAuto" in js
+    assert "function insertVertexOnEdge" in js
+    assert "function nearestPointOnSegment" in js
+    assert "type: \"vertex\"" in js
+    # Validação visual antes de salvar desvios relevantes.
+    assert "function t0DeviationWarnings" in js
+    assert "> 10" in js
+    assert "1.35" in js
+    assert "window.confirm(" in js
+    css = _css()
+    assert ".auto-segment" in css
+    assert ".auto-sensitivity" in css
+    assert ".auto-mode" in css
+
+
+# ---------------------------------------------------------------------------
+# Datas do card "Resultado de <lesão>"
+# ---------------------------------------------------------------------------
+def test_result_card_parses_brazilian_dates():
+    js = _js()
+    # Parse explícito de DD/MM/YYYY antes de exibir no cabeçalho do card.
+    assert "function formatResultTimestamp" in js
+    assert "function parsePatientDate" in js
+    assert r"/^(\d{2})[/-](\d{2})[/-](\d{4})/" in js
+    assert "const brazilian = text.match(" in js
+    assert "formatResultTimestamp(current.created_at)" in js
+    assert 'return "Sem data"' in js
+    # O card não deve delegar a data ao parser nativo (gera "Invalid Date").
+    assert "new Date(current.created_at)" not in js
+
+
+# ---------------------------------------------------------------------------
+# Mapeamento de Campo (ROI) — modo complementar Quantirides
+# ---------------------------------------------------------------------------
+def test_field_scan_mode_controls_exist():
+    js = _js()
+    css = _css()
+    # Seletor de modo no topo do painel do passo 4.
+    assert "Mapeamento de Campo (ROI)" in js
+    assert 'data-action="morph-mode"' in js
+    assert 'data-mode="field"' in js
+    assert 'data-mode="lesions"' in js
+    # ROI ampla, botão de mapeamento e perfis colorimétricos.
+    assert 'data-action="field-draw-roi"' in js
+    assert 'data-action="field-scan"' in js
+    assert "Mapear estrias na ROI" in js
+    assert 'data-field-mode=' in js
+    assert '["auto", "Auto"]' in js
+    assert '["rubra", "Rubra"]' in js
+    assert '["alba", "Alba"]' in js
+    assert "function runFieldScan" in js
+    assert '"/field-scan"' in js
+    # Filtro global.
+    assert 'id="field-min-length"' in js
+    assert 'id="field-max-length"' in js
+    assert 'id="field-sensitivity"' in js
+    # Classificação em 3 faixas com cores Quantirides.
+    assert "FIELD_CATEGORIES" in js
+    assert "#06b6d4" in js
+    assert "#ec4899" in js
+    assert "#f59e0b" in js
+    assert 'id="field-criteria"' in js
+    assert "data-field-threshold" in js
+    assert "function fieldCategoryIndex" in js
+    assert "function fieldCategorySummary" in js
+    assert "function updateFieldClassificationUI" in js
+    # Renderização com transparência e envio opcional para L1–L4.
+    assert "function drawFieldScene" in js
+    assert "ctx.globalAlpha = 0.42" in js
+    assert "function updateFieldTooltip" in js
+    assert 'data-action="field-assign"' in js
+    assert "function assignFieldObject" in js
+    # Persistência no estado da sessão.
+    assert "state.fieldResults[session.id]" in js
+
+    assert ".morph-mode" in css
+    assert ".field-scan" in css
+    assert ".field-classification" in css
+    assert ".field-legend" in css

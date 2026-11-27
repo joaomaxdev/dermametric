@@ -35,8 +35,10 @@ try:  # importação como pacote (uvicorn backend.main:app / pytest)
     from . import backup as backup_mod
     from .version import APP_VERSION
     from .models import (
+        AutoSegmentRequest,
         CalibrationRequest,
         ClinicalScalesRequest,
+        FieldScanRequest,
         LesionLabelsRequest,
         MeasureRequest,
         RegisterRequest,
@@ -54,8 +56,10 @@ except ImportError:  # pragma: no cover - execução direta de dentro de backend
     from version import APP_VERSION  # type: ignore[no-redef]
     import backup as backup_mod  # type: ignore[no-redef]
     from models import (  # type: ignore[no-redef]
+        AutoSegmentRequest,
         CalibrationRequest,
         ClinicalScalesRequest,
+        FieldScanRequest,
         LesionLabelsRequest,
         MeasureRequest,
         RegisterRequest,
@@ -886,6 +890,60 @@ def register(session_id: str, payload: RegisterRequest) -> dict[str, Any]:
         },
         "session": session,
     }
+
+
+@app.post("/api/sessions/{session_id}/auto-segment")
+def auto_segment(
+    session_id: str, payload: AutoSegmentRequest
+) -> dict[str, Any]:
+    """Segmenta a região-alvo com CIELAB + GrabCut guiada por caixa/T0."""
+    row = _require_session(session_id)
+    if not row["aligned_image_path"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Conclua o alinhamento da sessão antes da segmentação automática",
+        )
+    with _materialized(row["aligned_image_path"]) as aligned_path:
+        result = _vision_call(
+            vision.auto_segment_polygon,
+            str(aligned_path),
+            payload.box,
+            payload.seed_polygon,
+            payload.sensitivity,
+            payload.mode,
+        )
+    return {"session_id": session_id, **result}
+
+
+@app.post("/api/sessions/{session_id}/field-scan")
+def field_scan(
+    session_id: str, payload: FieldScanRequest
+) -> dict[str, Any]:
+    """Mapeia múltiplas estrias dentro de uma ROI ampla da imagem alinhada."""
+    row = _require_session(session_id)
+    if not row["aligned_image_path"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Conclua o alinhamento da sessão antes do mapeamento de campo",
+        )
+    if not row["px_per_mm"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Calibre a régua (px_per_mm) antes do mapeamento de campo",
+        )
+    with _materialized(row["aligned_image_path"]) as aligned_path:
+        result = _vision_call(
+            vision.scan_field_striae,
+            str(aligned_path),
+            payload.roi_box,
+            float(row["px_per_mm"]),
+            payload.mode,
+            payload.sensitivity,
+            payload.min_length_mm,
+            payload.max_length_mm,
+            payload.min_aspect_ratio,
+        )
+    return {"session_id": session_id, **result}
 
 
 @app.post("/api/sessions/{session_id}/measure")
