@@ -596,48 +596,179 @@ def project_roi_inverse(
 # 3b. Refinamento elástico local das referências de T0 (pós-homografia)
 # ---------------------------------------------------------------------------
 LOCAL_REFINE_DEFAULT_MARGIN_PX = 90
-LOCAL_REFINE_MIN_CC = 0.45
-LOCAL_REFINE_MAX_SHIFT_MM = 10.0
+LOCAL_COARSE_TEMPLATE_MARGIN_PX = 45
+LOCAL_COARSE_SEARCH_MARGIN_PX = 160
+LOCAL_REFINE_MIN_SCORE = 0.35
+LOCAL_REFINE_MIN_CC = 0.42
+LOCAL_REFINE_MAX_SHIFT_MM = 20.0
 
 
-def _local_texture_channel(image_bgr: np.ndarray) -> np.ndarray:
-    """Canal L* com CLAHE local para evidenciar relevo, poros e folículos.
+def _robust_unit(values: np.ndarray, low: float = 1.0, high: float = 99.0) -> np.ndarray:
+    """Normaliza para 0..1 por percentis, ignorando outliers de textura."""
+    array = np.asarray(values, dtype=np.float32)
+    finite = array[np.isfinite(array)]
+    if finite.size == 0:
+        return np.zeros_like(array, dtype=np.float32)
+    lo = float(np.percentile(finite, low))
+    hi = float(np.percentile(finite, high))
+    if hi - lo < 1e-6:
+        return np.zeros_like(array, dtype=np.float32)
+    return np.clip((array - lo) / (hi - lo), 0.0, 1.0).astype(np.float32)
 
-    A cor da estria pode mudar entre sessões, mas o microrelevo da pele
-    permanece estável. Equalizar apenas a luminância destaca esse padrão
-    independentemente do tom da lesão.
+
+def _local_structure_map(image_bgr: np.ndarray) -> np.ndarray:
+    """Mapa estrutural invariante à iluminação para o alinhamento coarse.
+
+    Combina três pistas estáveis entre sessões:
+
+    * luminância normalizada por CLAHE (contraste global independente do flash);
+    * crista local ``L* - GaussianBlur(L*)`` (relevo da estria e da pele);
+    * queda de croma ``blur(C*) - C*`` (estrias costumam perder saturação).
+
+    Uma suavização leve reduz rugas/microtexturas perpendiculares que não
+    carregam posição útil, sem apagar o contorno alongado da lesão.
     """
     lab = bgr_to_cielab_float(image_bgr)
-    lightness = np.clip(lab[..., 0] * 2.55, 0.0, 255.0).astype(np.uint8)
+    lightness = lab[..., 0]
+    chroma = np.hypot(lab[..., 1], lab[..., 2])
+
+    lightness_u8 = np.clip(lightness * 2.55, 0.0, 255.0).astype(np.uint8)
     clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-    enhanced = clahe.apply(lightness)
-    # Suaviza ruído de sensor sem apagar a textura fina.
-    return cv2.GaussianBlur(enhanced, (3, 3), 0).astype(np.float32)
+    normalized_lightness = _robust_unit(clahe.apply(lightness_u8))
+
+    ridge = lightness - cv2.GaussianBlur(lightness, (0, 0), 3.0)
+    ridge_scale = float(np.percentile(np.abs(ridge[np.isfinite(ridge)]), 99) or 0.0)
+    normalized_ridge = (
+        np.clip(ridge / ridge_scale, -1.0, 1.0).astype(np.float32)
+        if ridge_scale > 1e-6
+        else np.zeros_like(ridge, dtype=np.float32)
+    )
+
+    chroma_blur = cv2.GaussianBlur(chroma, (0, 0), 4.0)
+    chroma_drop = _robust_unit(np.maximum(0.0, chroma_blur - chroma))
+
+    combined = (
+        0.40 * normalized_lightness
+        + 0.40 * normalized_ridge
+        + 0.20 * chroma_drop
+    )
+    # Suavização curta: elimina micro-rugas de alta frequência e preserva a
+    # posição do corpo alongado da estria.
+    return cv2.GaussianBlur(combined, (0, 0), 1.2).astype(np.float32)
+
+
+def _coarse_template_shift(
+    reference_structure: np.ndarray,
+    current_structure: np.ndarray,
+    template_box: tuple[int, int, int, int],
+    search_margin_px: int,
+    image_width: int,
+    image_height: int,
+) -> dict[str, object] | None:
+    """Busca grossa por template: alinha o recorte de T0 na janela expandida.
+
+    ``cv2.matchTemplate`` com ``TM_CCOEFF_NORMED`` é robusto a ganho/offset de
+    iluminação e não depende de uma inicialização próxima como o ECC. Retorna o
+    deslocamento ``(dx, dy)``, o ``score`` e a própria matriz de resposta para
+    conferir, depois do ECC, qual posicionamento explica melhor a textura.
+    """
+    tx0, ty0, tx1, ty1 = template_box
+    if tx1 - tx0 < 12 or ty1 - ty0 < 12:
+        return None
+    template = reference_structure[ty0:ty1, tx0:tx1]
+    if template.size == 0:
+        return None
+
+    sx0 = max(0, tx0 - int(search_margin_px))
+    sy0 = max(0, ty0 - int(search_margin_px))
+    sx1 = min(image_width, tx1 + int(search_margin_px))
+    sy1 = min(image_height, ty1 + int(search_margin_px))
+    search = current_structure[sy0:sy1, sx0:sx1]
+    if search.shape[0] < template.shape[0] or search.shape[1] < template.shape[1]:
+        return None
+
+    try:
+        response = cv2.matchTemplate(search, template, cv2.TM_CCOEFF_NORMED)
+    except cv2.error:
+        return None
+    if response.size == 0:
+        return None
+    _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(response)
+    if not np.isfinite(max_val):
+        return None
+    best_x = sx0 + int(max_loc[0])
+    best_y = sy0 + int(max_loc[1])
+    return {
+        "dx": float(best_x - tx0),
+        "dy": float(best_y - ty0),
+        "score": float(max_val),
+        "response": response,
+        "sx0": sx0,
+        "sy0": sy0,
+        "tx0": tx0,
+        "ty0": ty0,
+    }
+
+
+def _template_response_at(
+    coarse: dict[str, object],
+    warp: np.ndarray,
+    window_origin: tuple[int, int],
+) -> float:
+    """Score do mesmo template na posição prevista pelo warp do ECC.
+
+    Permite comparar, em bases iguais, a colocação grosseira e a refinada. Se o
+    ECC escorregar para uma micro-ruga vizinha, a resposta nessa posição cai e
+    o resultado grosseiro (mais correlacionado) é preservado.
+    """
+    response = coarse.get("response")
+    if not isinstance(response, np.ndarray) or response.size == 0:
+        return 0.0
+    x0, y0 = window_origin
+    tx0 = float(coarse["tx0"])
+    ty0 = float(coarse["ty0"])
+    sx0 = int(coarse["sx0"])
+    sy0 = int(coarse["sy0"])
+    point = np.asarray(
+        [[[tx0 - x0, ty0 - y0]]], dtype=np.float64
+    ).reshape(-1, 1, 2)
+    warped = cv2.transform(point, warp).reshape(2) + np.array([x0, y0])
+    rx = int(round(float(warped[0]) - sx0))
+    ry = int(round(float(warped[1]) - sy0))
+    if not (0 <= ry < response.shape[0] and 0 <= rx < response.shape[1]):
+        return 0.0
+    patch = response[max(0, ry - 1): ry + 2, max(0, rx - 1): rx + 2]
+    if patch.size == 0:
+        return 0.0
+    return float(np.nanmax(patch))
 
 
 def _ecc_warp_local(
     reference_texture: np.ndarray,
     current_texture: np.ndarray,
+    init_translation: tuple[float, float] = (0.0, 0.0),
 ) -> tuple[float, np.ndarray | None, str | None]:
-    """Estima o warp que leva coordenadas de T0 para a imagem atual.
+    """Refina o warp local por ECC partindo do deslocamento grosseiro.
 
     ``cv2.findTransformECC(template, input, warp)`` devolve um warp que mapeia
     ``input`` no espaço de ``template``. Como queremos mover o polígono de T0
     (input) para a sessão atual (template), passamos a imagem atual como
-    template. Há fallback progressivo para modelos mais restritos.
+    template. A matriz é inicializada com ``(dx0, dy0)`` do ``matchTemplate``;
+    sem essa inicialização o ECC fica preso em micro-rugas próximas ao ponto
+    inicial. Há fallback para translação pura.
     """
     criteria = (
         cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
         50,
         1e-4,
     )
+    dx0, dy0 = float(init_translation[0]), float(init_translation[1])
     models = (
-        (cv2.MOTION_AFFINE, "affine"),
         (cv2.MOTION_EUCLIDEAN, "euclidean"),
         (cv2.MOTION_TRANSLATION, "translation"),
     )
     for motion, label in models:
-        warp = np.eye(2, 3, dtype=np.float32)
+        warp = np.array([[1.0, 0.0, dx0], [0.0, 1.0, dy0]], dtype=np.float32)
         try:
             cc, warp = cv2.findTransformECC(
                 current_texture,
@@ -661,26 +792,32 @@ def refine_t0_polygons_local(
     px_per_mm: float,
     *,
     margin_px: int = LOCAL_REFINE_DEFAULT_MARGIN_PX,
+    template_margin_px: int = LOCAL_COARSE_TEMPLATE_MARGIN_PX,
+    min_score: float = LOCAL_REFINE_MIN_SCORE,
     min_cc: float = LOCAL_REFINE_MIN_CC,
     max_shift_mm: float = LOCAL_REFINE_MAX_SHIFT_MM,
 ) -> dict[str, dict[str, object]]:
-    """Refina os polígonos de T0 para microdeformações elásticas da pele.
+    """Refina os polígonos de T0 para deslocamentos elásticos locais.
 
-    A homografia global corrige rotação/escala/perspectiva, mas pequenas
-    deformações locais da pele (elasticidade, postura, edema) permanecem entre
-    T0 e T1–Tn. Para cada lesão, recorta-se uma janela ao redor do polígono de
-    T0 nas duas imagens **já alinhadas**, equaliza-se o canal L* e estima-se um
-    warp local por ECC (afim, com fallback euclidiano/translação).
+    A homografia global corrige rotação/escala/perspectiva, mas a pele ainda
+    pode deslizar lateralmente entre T0 e T1–Tn. O ECC puro, inicializado em
+    ``(0, 0)``, fica preso em micro-rugas ou aborta sem mover o polígono. Por
+    isso o alinhamento é **coarse-to-fine**:
 
-    Travas de segurança: o ajuste só é aplicado se a correlação for pelo menos
-    ``min_cc`` e o deslocamento máximo dos vértices não exceder
-    ``max_shift_mm`` (convertido por ``px_per_mm``). Caso contrário, o polígono
-    de T0 permanece exatamente na posição global.
+    1. mapa estrutural (L*+CLAHE, crista local e queda de croma);
+    2. busca grossa por ``matchTemplate`` (``TM_CCOEFF_NORMED``) numa janela
+       expandida;
+    3. refino ECC euclidiano inicializado com o deslocamento grosseiro, com
+       fallback para translação pura.
+
+    Travas de segurança: aplica apenas quando a busca grossa ou o ECC têm
+    evidência suficiente — ``(score >= min_score or ecc_cc >= min_cc)`` — e o
+    deslocamento máximo dos vértices não excede ``max_shift_mm``. Caso
+    contrário, o polígono de T0 permanece na posição global.
 
     Returns:
-        Mapeamento ``código -> {polygon, reference_polygon, applied, cc,
-        shift_mm, max_shift_px, motion, reason, window}``. ``polygon`` já é o
-        polígono refinado quando ``applied`` é verdadeiro.
+        Mapeamento ``código -> {polygon, reference_polygon, applied, shift_mm,
+        score, cc, coarse_score, max_shift_px, motion, reason, window}``.
     """
     reference_polygons = {
         str(code): [[float(x), float(y)] for x, y in points]
@@ -696,7 +833,9 @@ def refine_t0_polygons_local(
             "polygon": [list(point) for point in points],
             "reference_polygon": [list(point) for point in points],
             "applied": False,
+            "score": 0.0,
             "cc": None,
+            "coarse_score": None,
             "shift_mm": 0.0,
             "max_shift_px": 0.0,
             "motion": None,
@@ -720,9 +859,12 @@ def refine_t0_polygons_local(
     # limites por segurança caso uma delas tenha sido recortada.
     height = min(reference_image.shape[0], current_image.shape[0])
     width = min(reference_image.shape[1], current_image.shape[1])
-    reference_texture_full = _local_texture_channel(reference_image[:height, :width])
-    current_texture_full = _local_texture_channel(current_image[:height, :width])
+    reference_structure = _local_structure_map(reference_image[:height, :width])
+    current_structure = _local_structure_map(current_image[:height, :width])
     max_shift_px_limit = float(max_shift_mm) * scale
+    search_margin_px = int(
+        max(32, min(LOCAL_COARSE_SEARCH_MARGIN_PX, round(float(max_shift_mm) * scale)))
+    )
 
     for code, points in reference_polygons.items():
         if len(points) < 3:
@@ -739,68 +881,127 @@ def refine_t0_polygons_local(
             results[code] = _untouched(points, "window_too_small")
             continue
 
-        reference_crop = reference_texture_full[y0:y1, x0:x1]
-        current_crop = current_texture_full[y0:y1, x0:x1]
+        reference_crop = reference_structure[y0:y1, x0:x1]
+        current_crop = current_structure[y0:y1, x0:x1]
         if reference_crop.size == 0 or current_crop.shape != reference_crop.shape:
             results[code] = _untouched(points, "window_too_small")
             continue
 
-        cc, warp, motion = _ecc_warp_local(reference_crop, current_crop)
+        # Template mais justo que a janela do ECC: inclui a lesão e uma margem
+        # curta, para que a busca grossa não seja diluída pela pele ao redor.
+        tx0 = max(0, int(np.floor(min(xs))) - int(template_margin_px))
+        ty0 = max(0, int(np.floor(min(ys))) - int(template_margin_px))
+        tx1 = min(width, int(np.ceil(max(xs))) + int(template_margin_px))
+        ty1 = min(height, int(np.ceil(max(ys))) + int(template_margin_px))
+        coarse = _coarse_template_shift(
+            reference_structure,
+            current_structure,
+            (tx0, ty0, tx1, ty1),
+            search_margin_px,
+            width,
+            height,
+        )
+        if coarse is None:
+            dx0, dy0, coarse_score = 0.0, 0.0, 0.0
+            coarse_reason = "coarse_unavailable"
+        else:
+            dx0 = float(coarse["dx"])
+            dy0 = float(coarse["dy"])
+            coarse_score = float(coarse["score"])
+            coarse_reason = None
+
+        cc, warp, motion = _ecc_warp_local(
+            reference_crop, current_crop, init_translation=(dx0, dy0)
+        )
         window = [x0, y0, x1 - x0, y1 - y0]
-        if warp is None or not np.isfinite(cc):
-            results[code] = _untouched(
-                points, "ecc_failed", window=window
-            )
-            continue
+        ecc_ok = (
+            warp is not None
+            and np.isfinite(cc)
+            and np.isfinite(warp).all()
+        )
+        ecc_cc = float(cc) if ecc_ok else float("nan")
+
+        # A busca grossa ancora o ECC, mas se o ECC escorregar para uma
+        # micro-ruga vizinha a resposta do template cai. Nesse caso preserva-se
+        # a translação grosseira, que explica melhor a textura observada.
+        coarse_warp = np.array(
+            [[1.0, 0.0, dx0], [0.0, 1.0, dy0]], dtype=np.float64
+        )
+        chosen_warp = coarse_warp
+        chosen_motion = "coarse_translation"
+        chosen_score = coarse_score
+
+        if coarse is not None:
+            if ecc_ok:
+                ecc_match = _template_response_at(coarse, warp, (x0, y0))
+                if (
+                    ecc_cc >= float(min_cc)
+                    and ecc_match >= coarse_score - 0.02
+                ):
+                    chosen_warp = warp
+                    chosen_motion = motion
+                    chosen_score = max(ecc_match, ecc_cc)
+        elif ecc_ok:
+            # Sem template disponível: ECC puro (inicializado em zero).
+            chosen_warp = warp
+            chosen_motion = motion
+            chosen_score = ecc_cc
 
         local_points = np.asarray(
             [[point[0] - x0, point[1] - y0] for point in points],
             dtype=np.float64,
         ).reshape(-1, 1, 2)
-        warped = cv2.transform(local_points, warp).reshape(-1, 2)
+        warped = cv2.transform(local_points, chosen_warp).reshape(-1, 2)
         moved = warped + np.array([x0, y0], dtype=np.float64)
         original = np.asarray(points, dtype=np.float64)
-        max_shift_px = float(np.max(np.linalg.norm(moved - original, axis=1)))
-        shift_mm = max_shift_px / scale
-
-        if cc < float(min_cc):
+        if not np.isfinite(moved).all():
             results[code] = _untouched(
                 points,
-                "low_correlation",
-                cc=cc,
-                motion=motion,
+                "ecc_failed",
+                cc=None if np.isnan(ecc_cc) else ecc_cc,
+                coarse_score=coarse_score,
+                motion=chosen_motion,
                 window=window,
-                max_shift_px=max_shift_px,
-                shift_mm=shift_mm,
+            )
+            continue
+        max_shift_px = float(np.max(np.linalg.norm(moved - original, axis=1)))
+        shift_mm = max_shift_px / scale
+        metadata = {
+            "cc": None if np.isnan(ecc_cc) else ecc_cc,
+            "coarse_score": coarse_score,
+            "score": chosen_score,
+            "motion": chosen_motion,
+            "window": window,
+            "max_shift_px": max_shift_px,
+            "shift_mm": shift_mm,
+        }
+
+        has_evidence = coarse_score >= float(min_score) or (
+            np.isfinite(ecc_cc) and ecc_cc >= float(min_cc)
+        )
+        if not has_evidence:
+            results[code] = _untouched(
+                points,
+                coarse_reason or "low_confidence",
+                **metadata,
             )
             continue
         if max_shift_px > max_shift_px_limit:
             results[code] = _untouched(
-                points,
-                "shift_exceeds_limit",
-                cc=cc,
-                motion=motion,
-                window=window,
-                max_shift_px=max_shift_px,
-                shift_mm=shift_mm,
+                points, "shift_exceeds_limit", **metadata
             )
-            continue
-        if not np.isfinite(moved).all():
-            results[code] = _untouched(points, "ecc_failed", window=window)
             continue
 
         results[code] = {
             "polygon": [[float(x), float(y)] for x, y in moved],
             "reference_polygon": [list(point) for point in points],
             "applied": True,
-            "cc": cc,
-            "shift_mm": shift_mm,
-            "max_shift_px": max_shift_px,
-            "motion": motion,
+            "score": chosen_score,
             "reason": "ok",
-            "window": window,
+            **metadata,
         }
     return results
+
 
 
 def _validate_roi(roi: Iterable[int], width: int, height: int) -> tuple[int, int, int, int]:

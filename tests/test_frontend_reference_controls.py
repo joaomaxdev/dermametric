@@ -129,14 +129,17 @@ def test_roi_visual_alerts_and_scale_css():
 
 def test_local_elastic_refinement_feeds_t0_references():
     js = _js()
-    assert "async function loadLocalAlignment(session)" in js
+    assert "async function loadLocalAlignment(session" in js
     assert "/reference-polygons" in js
     assert "local_alignment" in js
-    assert "Ajuste elástico local" in js
+    assert "Alinhamento local T0→" in js
+    assert "Alinhamento global mantido" in js
+    assert "LOCAL_ALIGNMENT_REASONS" in js
     assert ".is-local-adjust" in _css()
 
     rois = js.split("function referenceRois()", 1)[1].split("\n}", 1)[0]
     assert "localAdjustment" in rois
+    assert "localEntry" in rois
     assert "referencePoints" in rois
     assert "entry.polygon" in rois
 

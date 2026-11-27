@@ -25,6 +25,19 @@ const LEGACY_CODES = {
   E1: "L1", E2: "L2", E3: "L3", E4: "L4",
 };
 
+// Motivos do refinamento elástico local (backend/vision.refine_t0_polygons_local).
+const LOCAL_ALIGNMENT_REASONS = {
+  low_confidence: "baixa correlação",
+  low_correlation: "baixa correlação",
+  shift_exceeds_limit: "deslocamento acima de 20 mm",
+  missing_scale: "escala px/mm ausente",
+  coarse_unavailable: "janela insuficiente para busca",
+  window_too_small: "janela insuficiente",
+  reference_not_aligned: "T0 ainda não alinhado",
+  no_reference_polygon: "sem polígono em T0",
+  ecc_failed: "falha no refinamento",
+};
+
 // Classificação Quantirides: 3 faixas por cor sobre o mapeamento de campo.
 const FIELD_CATEGORIES = [
   { key: "cyan", color: "#06b6d4", label: "Ciano · finas/leves" },
@@ -388,6 +401,7 @@ function referenceRois() {
       code,
       points,
       referencePoints: measurement.polygon.map((point) => [Number(point[0]), Number(point[1])]),
+      localEntry: entry || null,
       localAdjustment: entry && entry.applied ? entry : null,
     });
   });
@@ -413,9 +427,10 @@ let localAlignmentRequest = null;
  * ativa. O resultado fica em ``session.local_alignment`` (também persistido
  * no servidor) e alimenta fantasma, "Fixar máscara" e seed do auto-ajuste.
  */
-async function loadLocalAlignment(session) {
+async function loadLocalAlignment(session, options = {}) {
   if (!session || isBaseline(session) || !session.aligned_image_url) return;
-  if (session.local_alignment?.polygons && Object.keys(session.local_alignment.polygons).length) return;
+  const force = Boolean(options.force);
+  if (!force && session.local_alignment?.polygons && Object.keys(session.local_alignment.polygons).length) return;
   if (localAlignmentRequest === session.id) return;
   localAlignmentRequest = session.id;
   try {
@@ -4324,7 +4339,7 @@ function setStep(step) {
   renderResults();
   view.autoFit = true;
   renderCanvas();
-  if (step === 4) loadLocalAlignment(activeSession());
+  if (step === 4) loadLocalAlignment(activeSession(), { force: true });
 }
 
 function stepCompletion() {
@@ -5009,8 +5024,20 @@ function step4HTML(session) {
     ? referenceRois().find((roi) => roi.code === lesionCode(state.stria)) || null
     : null;
   const localAdjustment = t0Roi?.localAdjustment || null;
+  const localEntry = t0Roi?.localEntry || localAdjustment || null;
   const localShiftLabel = localAdjustment
     ? `${(Number(localAdjustment.shift_mm) || 0).toFixed(1).replace(".", ",")} mm`
+    : "";
+  const localScoreLabel = localAdjustment && Number.isFinite(Number(localAdjustment.score))
+    ? Number(localAdjustment.score).toFixed(2)
+    : "";
+  const localReasonLabel = localEntry && !localAdjustment
+    ? (LOCAL_ALIGNMENT_REASONS[localEntry.reason] || "sem correspondência segura")
+    : "";
+  const localStatus = t0Roi
+    ? (localAdjustment
+      ? `Alinhamento local T0→${sessionCode(session)}: ${localShiftLabel}${localScoreLabel ? ` (score ${localScoreLabel})` : ""}`
+      : `Alinhamento global mantido${localReasonLabel ? ` (${localReasonLabel})` : ""}`)
     : "";
 
   const lesionInputs = LESIONS.map((item) => `
@@ -5045,9 +5072,9 @@ function step4HTML(session) {
           Régua mm
         </button>
       </div>
-      ${localAdjustment ? `
-        <p class="form-hint is-local-adjust" title="Microdeformação elástica estimada por correlação de textura (ECC)">
-          Ajuste elástico local: +${localShiftLabel}${localAdjustment.cc != null ? ` · ECC ${Number(localAdjustment.cc).toFixed(2)}` : ""}
+      ${localStatus ? `
+        <p class="form-hint is-local-adjust ${localAdjustment ? "" : "is-muted"}" title="Alinhamento fino da referência de T0 por busca coarse-to-fine (template + ECC)">
+          ${localStatus}
         </p>` : ""}` : (session.px_per_mm ? `
       <div class="form-actions">
         <button type="button" class="btn btn-ghost btn-sm ${state.scaleGuide ? "is-active" : ""}" data-action="toggle-scale" aria-pressed="${state.scaleGuide}">

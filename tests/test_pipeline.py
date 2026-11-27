@@ -739,13 +739,20 @@ def test_reference_polygons_local_refinement_endpoint(client):
     assert reference["shift_mm"] >= 0
     assert reference["reason"] in {
         "ok",
-        "low_correlation",
+        "low_confidence",
+        "coarse_unavailable",
         "shift_exceeds_limit",
         "ecc_failed",
         "missing_scale",
     }
     if reference["applied"]:
-        assert reference["cc"] >= vision.LOCAL_REFINE_MIN_CC
+        assert (
+            reference["score"] >= vision.LOCAL_REFINE_MIN_SCORE
+            or (
+                reference["cc"] is not None
+                and reference["cc"] >= vision.LOCAL_REFINE_MIN_CC
+            )
+        )
     else:
         assert reference["polygon"] == reference["reference_polygon"]
 

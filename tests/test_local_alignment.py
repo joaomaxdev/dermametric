@@ -68,17 +68,17 @@ def _shift_region(
     image: np.ndarray,
     dx: int,
     dy: int = 0,
-    box: tuple[int, int, int, int] = (110, 170, 490, 430),
+    box: tuple[int, int, int, int] = (110, 170, 450, 430),
 ) -> np.ndarray:
-    """Desloca uma janela ampla (textura + estria) simulando deformação local.
+    """Desloca uma janela ampla (textura + estria) para a direita/baixo.
 
     A janela cobre toda a área de busca com margem de 90 px, de modo que o
-    conteúdo visto pelo ECC seja efetivamente deslocado — como numa
+    conteúdo visto pelo alinhamento seja efetivamente deslocado — como numa
     microdeformação elástica real.
     """
     x0, y0, x1, y1 = box
     out = image.copy()
-    out[y0:y1, x0:x1] = image[y0 + dy : y1 + dy, x0 + dx : x1 + dx]
+    out[y0 + dy : y1 + dy, x0 + dx : x1 + dx] = image[y0:y1, x0:x1]
     return out
 
 
@@ -104,15 +104,58 @@ def test_refine_follows_local_elastic_shift_of_three_mm(tmp_path):
 
     assert result["applied"] is True
     assert result["reason"] == "ok"
-    assert result["cc"] >= vision.LOCAL_REFINE_MIN_CC
+    assert result["score"] >= vision.LOCAL_REFINE_MIN_SCORE
+    assert result["cc"] is not None
     assert result["shift_mm"] == pytest.approx(3.0, abs=0.7)
-    assert result["motion"] in {"affine", "euclidean", "translation"}
+    assert result["motion"] in {"coarse_translation", "euclidean", "translation"}
 
     delta = _centroid(result["polygon"]) - _centroid(polygon)
     assert delta[0] == pytest.approx(30.0, abs=4.0)
     assert abs(delta[1]) <= 3.0
     # O polígono de referência permanece rastreável no metadado.
     assert result["reference_polygon"] == polygon
+
+
+def test_coarse_to_fine_finds_stria_shift_despite_periodic_wrinkles(tmp_path):
+    """ECC puro fica preso nas rugas; a busca grossa acha os ~6 mm reais."""
+    size = 800
+    px_per_mm = 6.0
+    rng = np.random.default_rng(3)
+    image = np.full((size, size, 3), (150, 170, 200), dtype=np.float32)
+    noise = cv2.GaussianBlur(
+        rng.normal(0, 10, (size, size, 1)).repeat(3, axis=2), (0, 0), 1.0
+    )
+    image = np.clip(image + noise, 0, 255).astype(np.uint8)
+    # Rugas horizontais periódicas (13 px): a textura não codifica posição em x.
+    rows = np.arange(size)[:, None]
+    wrinkles = (8 * np.sin(2 * np.pi * rows / 13.0)).astype(np.float32)
+    image = np.clip(image.astype(np.float32) + wrinkles[..., None], 0, 255).astype(np.uint8)
+    cv2.ellipse(
+        image, (400, 400), (120, 25), 0, 0, 360, (70, 80, 150), -1,
+        lineType=cv2.LINE_8,
+    )
+    polygon = _ellipse_polygon(400, 400, a=120, b=25, n=64)
+
+    # 35 px a 6 px/mm ≈ 5,8 mm de deslocamento local lateral.
+    shifted = _shift_region(
+        image, dx=35, box=(20, 250, 740, 550)
+    )
+    reference_path = _write(tmp_path / "t0.png", image)
+    current_path = _write(tmp_path / "t1.png", shifted)
+
+    result = vision.refine_t0_polygons_local(
+        reference_path, current_path, {"L1": polygon}, px_per_mm
+    )["L1"]
+
+    assert result["applied"] is True
+    assert result["reason"] == "ok"
+    assert result["coarse_score"] >= vision.LOCAL_REFINE_MIN_SCORE
+    assert result["shift_mm"] == pytest.approx(35 / px_per_mm, abs=0.6)
+
+    delta = _centroid(result["polygon"]) - _centroid(polygon)
+    # Erro de posição < 3 px em relação à estria real.
+    assert delta[0] == pytest.approx(35.0, abs=3.0)
+    assert abs(delta[1]) < 1.0
 
 
 def test_refine_keeps_global_polygon_when_shift_exceeds_limit(tmp_path, monkeypatch):
@@ -122,12 +165,13 @@ def test_refine_keeps_global_polygon_when_shift_exceeds_limit(tmp_path, monkeypa
         _write(tmp_path / "t0.png", t0),
         _write(tmp_path / "t1.png", t0),
     )
-    # 15 mm > 10 mm: a transformação estimada deve ser rejeitada.
-    warp = np.array([[1.0, 0.0, 15.0 * PX_PER_MM], [0.0, 1.0, 0.0]], dtype=np.float64)
+    # 25 mm > 20 mm: a transformação estimada deve ser rejeitada.
+    warp = np.array([[1.0, 0.0, 25.0 * PX_PER_MM], [0.0, 1.0, 0.0]], dtype=np.float64)
+    monkeypatch.setattr(vision, "_coarse_template_shift", lambda *a, **k: None)
     monkeypatch.setattr(
         vision,
         "_ecc_warp_local",
-        lambda *args, **kwargs: (0.92, warp, "affine"),
+        lambda *args, **kwargs: (0.92, warp, "euclidean"),
     )
 
     result = vision.refine_t0_polygons_local(
@@ -136,7 +180,7 @@ def test_refine_keeps_global_polygon_when_shift_exceeds_limit(tmp_path, monkeypa
 
     assert result["applied"] is False
     assert result["reason"] == "shift_exceeds_limit"
-    assert result["shift_mm"] == pytest.approx(15.0, abs=1e-6)
+    assert result["shift_mm"] == pytest.approx(25.0, abs=1e-6)
     assert result["polygon"] == polygon
 
 
@@ -148,10 +192,11 @@ def test_refine_keeps_global_polygon_when_correlation_is_low(tmp_path, monkeypat
         _write(tmp_path / "t1.png", t0),
     )
     identity = np.eye(2, 3, dtype=np.float64)
+    monkeypatch.setattr(vision, "_coarse_template_shift", lambda *a, **k: None)
     monkeypatch.setattr(
         vision,
         "_ecc_warp_local",
-        lambda *args, **kwargs: (0.20, identity, "affine"),
+        lambda *args, **kwargs: (0.20, identity, "euclidean"),
     )
 
     result = vision.refine_t0_polygons_local(
@@ -159,7 +204,7 @@ def test_refine_keeps_global_polygon_when_correlation_is_low(tmp_path, monkeypat
     )["L1"]
 
     assert result["applied"] is False
-    assert result["reason"] == "low_correlation"
+    assert result["reason"] == "coarse_unavailable"
     assert result["polygon"] == polygon
 
 

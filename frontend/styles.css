@@ -2622,6 +2622,12 @@ body.has-modal { overflow: hidden; }
   box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.16);
 }
 
+.form-hint.is-local-adjust.is-muted { color: #8fa6b6; }
+.form-hint.is-local-adjust.is-muted::before {
+  background: #64748b;
+  box-shadow: 0 0 0 3px rgba(100, 116, 139, 0.14);
+}
+
 .gais-blind {
   display: flex;
   align-items: center;
